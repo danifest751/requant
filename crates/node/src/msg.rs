@@ -9,7 +9,10 @@ use tnet::sha256::sha256;
 
 /// Protocol 2: `Hello` carries a node id, the listening port and a user agent (later fields may follow and
 /// are ignored); `GetAddr`/`Addr` exchange peer addresses.
-pub const PROTOCOL: u32 = 2;
+/// Protocol 3 adds headers-first sync (`GetHeaders`/`Headers`); peers below 3 are synced block by block.
+pub const PROTOCOL: u32 = 3;
+pub const HEADERS_PROTOCOL: u32 = 3;
+pub const MAX_HEADERS: usize = 2000;
 pub const MIN_PROTOCOL: u32 = 2;
 pub const MAX_ADDR: usize = 100;
 pub const MAX_AGENT: usize = 64;
@@ -19,7 +22,14 @@ pub const MAX_LOCATOR: usize = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Msg {
-    Hello { protocol: u32, height: u64, tip: Hash, node_id: u64, listen_port: u16, agent: String },
+    Hello {
+        protocol: u32,
+        height: u64,
+        tip: Hash,
+        node_id: u64,
+        listen_port: u16,
+        agent: String,
+    },
     GetBlocks(Vec<Hash>),
     Inv(Vec<Hash>),
     GetData(Vec<Hash>),
@@ -29,6 +39,9 @@ pub enum Msg {
     Pong(u64),
     GetAddr,
     Addr(Vec<SocketAddr>),
+    GetHeaders(Vec<Hash>),
+    /// `varint n || (header || claim)*`, decoded by the node (the claim size depends on the network).
+    Headers(Vec<u8>),
 }
 
 fn hashes(w: &mut Writer, v: &[Hash]) {
@@ -85,6 +98,14 @@ impl Msg {
                 7
             }
             Msg::GetAddr => 8,
+            Msg::GetHeaders(v) => {
+                hashes(&mut w, v);
+                10
+            }
+            Msg::Headers(b) => {
+                w.raw(b);
+                11
+            }
             Msg::Addr(v) => {
                 w.varint(v.len() as u64);
                 for a in v {
@@ -129,6 +150,8 @@ impl Msg {
             6 => Msg::Ping(r.u64()?),
             7 => Msg::Pong(r.u64()?),
             8 => Msg::GetAddr,
+            10 => Msg::GetHeaders(read_hashes(&mut r, MAX_LOCATOR)?),
+            11 => return Ok(Msg::Headers(p.to_vec())),
             9 => {
                 let n = r.varint(MAX_ADDR as u64)?;
                 let mut v = Vec::with_capacity(n as usize);
@@ -200,6 +223,8 @@ mod tests {
                 agent: "requantd/test".into(),
             },
             Msg::GetAddr,
+            Msg::GetHeaders(vec![[5; 32]]),
+            Msg::Headers(vec![0]),
             Msg::Addr(vec!["1.2.3.4:19333".parse().unwrap(), "[2001:db8::1]:7".parse().unwrap()]),
             Msg::GetBlocks(vec![[1; 32], [2; 32]]),
             Msg::Inv(vec![[4; 32]]),

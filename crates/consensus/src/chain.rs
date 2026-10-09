@@ -229,12 +229,7 @@ impl Chain {
 
     /// Seed of the epoch containing `height`, on the branch ending at `parent` (CHAIN.md §6).
     pub fn epoch_seed(&self, parent: &Hash, height: u64) -> Hash {
-        let e = height / self.net.epoch_len;
-        if e == 0 {
-            return tagged("requant/epoch0", &[&self.net.chain_id]);
-        }
-        let anchor = self.ancestor(parent, e * self.net.epoch_len - self.net.lookback);
-        tagged("requant/epoch", &[&e.to_le_bytes(), &anchor])
+        epoch_seed(&self.net, height, |h| self.ancestor(parent, h))
     }
 
     /// Refuse blocks whose branch leaves the best chain more than `depth` blocks below the tip. This is a
@@ -298,9 +293,9 @@ impl Chain {
         self.epochs.last().unwrap().1.clone()
     }
 
-    /// Header rules against the parent (CHAIN.md §5 items 1–4); `now` is the local clock. `trusted` skips
-    /// the clock and the work claim (blocks this node already verified, replayed from its own storage).
-    fn check_header(&mut self, block: &Block, now: u64, trusted: bool) -> Result<(), Error> {
+    /// Header rules against the parent (CHAIN.md §5 items 1–4); `now` is the local clock.
+    fn check_header(&mut self, block: &Block, now: u64, verify: Verify) -> Result<(), Error> {
+        let trusted = verify == Verify::Stored;
         let h = &block.header;
         let parent = self.entries.get(&h.prev).ok_or(Error::UnknownParent)?;
         if parent.status == Status::Invalid {
@@ -327,39 +322,38 @@ impl Chain {
         if h.target != next_target(&self.net, p_height, p_time) {
             return Err(Error::Invalid("target"));
         }
-        if trusted {
+        if verify != Verify::Full {
             return Ok(());
         }
         let seed = self.epoch_seed(&h.prev, h.height);
         let epoch = self.epoch(&seed);
-        let c = &block.claim;
-        epoch
-            .check(&h.digest(&self.net.chain_id), c.nonce, c.i, c.c, &c.piece, &h.target.to_be_bytes(), self.threads)
-            .map_err(|r| match r {
-                tnet::Reject::BadIndex => Error::Invalid("claim index"),
-                tnet::Reject::AboveTarget => Error::Invalid("claim above target"),
-                tnet::Reject::WrongPiece => Error::Invalid("claim piece does not match the network"),
-            })
+        verify_claim(&self.net, &epoch, h, &block.claim, self.threads)
     }
 
     /// Validate and store a block, switching the best chain if it now has the most work.
     pub fn accept(&mut self, block: Block, now: u64) -> Result<Accepted, Error> {
-        self.accept_inner(block, now, false)
+        self.accept_inner(block, now, Verify::Full)
     }
 
-    /// Re-accept a block this node verified before (from its own storage): the work claim is not
-    /// recomputed; every other rule, including all transaction checks, still applies.
+    /// As [`Chain::accept`] for a block whose header and work claim were already verified (headers-first
+    /// sync, [`crate::headers::HeaderChain`]): the claim is not recomputed; every other rule applies.
+    pub fn accept_prevalidated(&mut self, block: Block, now: u64) -> Result<Accepted, Error> {
+        self.accept_inner(block, now, Verify::ClaimChecked)
+    }
+
+    /// Re-accept a block this node verified before (from its own storage): the work claim and the clock
+    /// are not checked; every other rule, including all transaction checks, still applies.
     pub fn accept_trusted(&mut self, block: Block) -> Result<Accepted, Error> {
-        self.accept_inner(block, 0, true)
+        self.accept_inner(block, 0, Verify::Stored)
     }
 
-    fn accept_inner(&mut self, block: Block, now: u64, trusted: bool) -> Result<Accepted, Error> {
+    fn accept_inner(&mut self, block: Block, now: u64, verify: Verify) -> Result<Accepted, Error> {
         let id = block.id(&self.net);
         if self.entries.contains_key(&id) {
             return Err(Error::Duplicate);
         }
         block.check_standalone(&self.net)?;
-        self.check_header(&block, now, trusted)?;
+        self.check_header(&block, now, verify)?;
         let parent = &self.entries[&block.header.prev];
         let entry = Entry {
             height: block.header.height,
@@ -600,6 +594,39 @@ impl Chain {
         };
         Block { header, claim: Claim::empty(self.net.tnet.w), txs: all }
     }
+}
+
+/// How much of a block's header to verify.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Verify {
+    /// Everything, including the work claim.
+    Full,
+    /// Everything but the work claim, verified earlier on the header alone.
+    ClaimChecked,
+    /// Neither the clock nor the claim: the node's own stored blocks.
+    Stored,
+}
+
+/// Seed of the epoch containing `height` (CHAIN.md §6); `ancestor_at(h)` gives the id of the block at
+/// height `h` on the branch being extended.
+pub fn epoch_seed(net: &Network, height: u64, ancestor_at: impl FnOnce(u64) -> Hash) -> Hash {
+    let e = height / net.epoch_len;
+    if e == 0 {
+        return tagged("requant/epoch0", &[&net.chain_id]);
+    }
+    let anchor = ancestor_at(e * net.epoch_len - net.lookback);
+    tagged("requant/epoch", &[&e.to_le_bytes(), &anchor])
+}
+
+/// Check a header's TNet work claim against its target with the epoch's weights (SPEC.md §7).
+pub fn verify_claim(net: &Network, epoch: &tnet::Epoch, h: &Header, c: &Claim, threads: usize) -> Result<(), Error> {
+    epoch.check(&h.digest(&net.chain_id), c.nonce, c.i, c.c, &c.piece, &h.target.to_be_bytes(), threads).map_err(|r| {
+        match r {
+            tnet::Reject::BadIndex => Error::Invalid("claim index"),
+            tnet::Reject::AboveTarget => Error::Invalid("claim above target"),
+            tnet::Reject::WrongPiece => Error::Invalid("claim piece does not match the network"),
+        }
+    })
 }
 
 /// Reference CPU miner: scan nonces from `start` for a ticket meeting the header's target. Practical only

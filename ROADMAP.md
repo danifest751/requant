@@ -49,7 +49,10 @@ test network.
       and address pages, search.
 - [x] Resource bounds for public nodes: orphan blocks limited by bytes (16 MiB), per peer (64) and height
       (4096 above the tip); four inbound connections per IP; explorer serves 32 requests at once.
-- [ ] Headers-first sync; persistent ban list.
+- [x] Headers-first sync (node 0.3, protocol 3): headers and work claims verified without bodies
+      (`crates/consensus/src/headers.rs`), bodies downloaded from several peers in parallel and accepted
+      without re-verifying claims; peers on protocol 2 are still synced block by block.
+- [ ] Persistent ban list.
 - [x] Deep-fork protection: forks more than `--max-reorg` blocks below the tip (default one epoch) are
       refused before their work is checked (node policy; recovery after a longer partition is manual).
 - [x] The current and next epoch's weights are derived on a background thread once their seeds are known.

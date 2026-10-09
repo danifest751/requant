@@ -5,10 +5,13 @@
 use crate::addrbook::{routable, AddrBook};
 use crate::index::TxIndex;
 use crate::mempool::Mempool;
-use crate::msg::{read_msg, write_msg, Msg, MAX_ADDR, MAX_INV, MIN_PROTOCOL, PROTOCOL};
+use crate::msg::{read_msg, write_msg, Msg, HEADERS_PROTOCOL, MAX_ADDR, MAX_HEADERS, MAX_INV, MIN_PROTOCOL, PROTOCOL};
 use crate::store::Store;
 use requant_consensus::block::Block;
-use requant_consensus::chain::{mine, Accepted, Chain};
+use requant_consensus::block::{Claim, Header};
+use requant_consensus::chain::{mine, verify_claim, Accepted, Chain};
+use requant_consensus::codec::{Reader, Writer};
+use requant_consensus::headers::HeaderChain;
 use requant_consensus::params::Network;
 use requant_consensus::tx::{Hash, Tx};
 use requant_consensus::Error;
@@ -94,11 +97,23 @@ pub struct Peer {
     pub agent: String,
     pub height: u64,
     pub since: u64,
+    /// Protocol version from the peer's greeting (0 until it arrives).
+    pub protocol: u32,
     inflight: usize,
 }
 
+/// Headers-first download: blocks requested at once along the best header chain, per peer, and how long a
+/// request may stay unanswered before it is given to another peer.
+const DOWNLOAD_WINDOW: u64 = 512;
+const PER_PEER_INFLIGHT: usize = 16;
+const INFLIGHT_TIMEOUT: u64 = 60;
+
 pub struct State {
     pub chain: Chain,
+    /// Verified headers, ahead of `chain` while syncing.
+    pub headers: HeaderChain,
+    /// Block downloads in flight: block id -> (peer, request time).
+    inflight: HashMap<Hash, (u64, u64)>,
     pub mempool: Mempool,
     pub index: TxIndex,
     pub book: AddrBook,
@@ -182,11 +197,20 @@ impl State {
         while let Some(b) = queue.pop() {
             let id = b.id(&self.chain.net);
             let bytes = b.encode();
-            match self.chain.accept(b.clone(), now()) {
+            self.inflight.remove(&id);
+            // a block whose header (and work claim) the header chain verified is not re-verified
+            let prevalidated = self.headers.contains(&id);
+            let result = if prevalidated {
+                self.chain.accept_prevalidated(b.clone(), now())
+            } else {
+                self.chain.accept(b.clone(), now())
+            };
+            match result {
                 Ok(acc) => {
                     if first.is_none() {
                         first = Some(acc);
                     }
+                    self.headers.add_valid(&b.header, &b.claim);
                     if let Err(e) = self.store.append(&bytes) {
                         eprintln!("store: {e}");
                     }
@@ -200,7 +224,10 @@ impl State {
                         }
                         self.index.sync(&self.chain);
                     }
-                    self.broadcast(&Msg::Inv(vec![id]), from);
+                    // announce new blocks, not the history being downloaded
+                    if self.chain.height() + 10 >= self.headers.height() {
+                        self.broadcast(&Msg::Inv(vec![id]), from);
+                    }
                     let children: Vec<Hash> =
                         self.orphans.iter().filter(|(_, o)| o.0.header.prev == id).map(|(k, _)| *k).collect();
                     for k in children {
@@ -212,19 +239,99 @@ impl State {
                 Err(Error::Duplicate) => {}
                 Err(Error::UnknownParent) => {
                     self.add_orphan(id, b, bytes.len(), from);
-                    if let Some(p) = from {
-                        self.send(p, Msg::GetBlocks(self.chain.locator()));
+                    // with a verified header the parent is already being downloaded
+                    if let (Some(p), false) = (from, prevalidated) {
+                        if self.peers.get(&p).is_some_and(|x| x.protocol >= HEADERS_PROTOCOL) {
+                            self.send(p, Msg::GetHeaders(self.headers.locator()));
+                        } else {
+                            self.send(p, Msg::GetBlocks(self.chain.locator()));
+                        }
                     }
                 }
                 Err(Error::Invalid("time too far in the future")) => {}
                 Err(e) => {
+                    if prevalidated {
+                        // a valid header with an invalid body: that branch is dead
+                        self.headers.mark_invalid(&id);
+                    }
                     if first.is_none() {
+                        self.schedule_downloads();
                         return Err(e);
                     }
                 }
             }
         }
+        self.schedule_downloads();
         Ok(first)
+    }
+
+    /// Request bodies along the best header chain from peers that have them, round robin, at most
+    /// `PER_PEER_INFLIGHT` per peer and `DOWNLOAD_WINDOW` blocks ahead of the block chain.
+    pub fn schedule_downloads(&mut self) {
+        let hh = self.headers.height();
+        let mut fork = self.chain.height().min(hh);
+        while fork > 0 && self.headers.best_id(fork) != self.chain.active_id(fork) {
+            fork -= 1;
+        }
+        if hh <= fork {
+            return;
+        }
+        let ids = self.headers.best_ids(fork + 1, (fork + DOWNLOAD_WINDOW).min(hh));
+        let mut load: HashMap<u64, usize> = HashMap::new();
+        for (p, _) in self.inflight.values() {
+            *load.entry(*p).or_default() += 1;
+        }
+        let mut peers: Vec<(u64, u64)> =
+            self.peers.iter().filter(|(_, p)| p.protocol > 0).map(|(id, p)| (*id, p.height)).collect();
+        peers.sort_unstable();
+        if peers.is_empty() {
+            return;
+        }
+        let mut plan: HashMap<u64, Vec<Hash>> = HashMap::new();
+        let mut rr = 0usize;
+        for (k, id) in ids.iter().enumerate() {
+            let height = fork + 1 + k as u64;
+            if self.chain.contains(id) || self.inflight.contains_key(id) || self.orphans.contains_key(id) {
+                continue;
+            }
+            let mut chosen = None;
+            for t in 0..peers.len() {
+                let (pid, ph) = peers[(rr + t) % peers.len()];
+                if ph >= height && load.get(&pid).copied().unwrap_or(0) < PER_PEER_INFLIGHT {
+                    chosen = Some(pid);
+                    rr = (rr + t + 1) % peers.len();
+                    break;
+                }
+            }
+            let Some(pid) = chosen else { break };
+            *load.entry(pid).or_default() += 1;
+            self.inflight.insert(*id, (pid, now()));
+            plan.entry(pid).or_default().push(*id);
+        }
+        for (pid, v) in plan {
+            self.send(pid, Msg::GetData(v));
+        }
+    }
+
+    /// Give unanswered block requests (and those of peers that left) to other peers.
+    fn expire_downloads(&mut self) {
+        let t = now();
+        let peers = &self.peers;
+        self.inflight.retain(|_, (p, at)| peers.contains_key(p) && t.saturating_sub(*at) < INFLIGHT_TIMEOUT);
+        self.schedule_downloads();
+    }
+
+    /// Serve `GetHeaders`: headers and claims of best-chain blocks after the locator.
+    fn headers_payload(&self, locator: &[Hash]) -> Vec<u8> {
+        let ids = self.chain.blocks_after(locator, MAX_HEADERS);
+        let mut w = Writer::default();
+        w.varint(ids.len() as u64);
+        for id in ids {
+            let b = self.chain.block(&id).unwrap();
+            w.raw(&b.header.encode());
+            w.raw(&b.claim.encode());
+        }
+        w.0
     }
 
     /// Keep an orphan within the count, byte, per-peer and height limits (oldest-first eviction is not
@@ -329,6 +436,7 @@ impl State {
                 };
                 let p = self.peers.get_mut(&peer).unwrap();
                 p.height = height;
+                p.protocol = protocol;
                 p.agent = agent.chars().filter(|c| !c.is_control()).take(64).collect();
                 p.listen = listen;
                 if outbound {
@@ -337,10 +445,20 @@ impl State {
                     self.book.add(l);
                 }
                 self.send(peer, Msg::GetAddr);
-                if height > self.chain.height() || !self.chain.contains(&tip) {
+                if protocol >= HEADERS_PROTOCOL {
+                    if height > self.headers.height() || !self.headers.contains(&tip) {
+                        self.send(peer, Msg::GetHeaders(self.headers.locator()));
+                    }
+                } else if height > self.chain.height() || !self.chain.contains(&tip) {
                     self.send(peer, Msg::GetBlocks(self.chain.locator()));
                 }
             }
+            Msg::GetHeaders(loc) => {
+                let payload = self.headers_payload(&loc);
+                self.send(peer, Msg::Headers(payload));
+            }
+            // handled in the reader loop (claims are verified without holding the lock)
+            Msg::Headers(_) => {}
             Msg::GetAddr => {
                 let mut v: Vec<SocketAddr> = self.peers.values().filter(|p| p.outbound).map(|p| p.addr).collect();
                 for a in self.book.sample(MAX_ADDR) {
@@ -393,7 +511,8 @@ impl State {
                 if let Some(p) = self.peers.get_mut(&peer) {
                     p.inflight = p.inflight.saturating_sub(1);
                     p.height = p.height.max(h);
-                    if p.inflight == 0 && p.height > ours {
+                    // block-by-block sync for peers without headers-first
+                    if p.protocol < HEADERS_PROTOCOL && p.inflight == 0 && p.height > ours {
                         let _ = p.tx.send(Msg::GetBlocks(self.chain.locator()));
                     }
                 }
@@ -442,6 +561,7 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
             agent: String::new(),
             height: 0,
             since: now(),
+            protocol: 0,
             inflight: 0,
         };
         st.peers.insert(id, peer);
@@ -460,8 +580,12 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
     std::thread::spawn(move || {
         let mut reader = BufReader::new(reader_stream);
         while let Ok(m) = read_msg(&mut reader, &magic) {
+            let result = match m {
+                Msg::Headers(bytes) => handle_headers(&shared, id, &bytes),
+                m => shared.lock().unwrap().on_message(id, m),
+            };
             let mut st = shared.lock().unwrap();
-            if let Err(why) = st.on_message(id, m) {
+            if let Err(why) = result {
                 if why != "connected to self" {
                     eprintln!("peer {addr}: disconnecting ({why})");
                     if why.starts_with("invalid") || why.starts_with("malformed") {
@@ -474,6 +598,55 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
         shared.lock().unwrap().peers.remove(&id);
         let _ = stream.shutdown(std::net::Shutdown::Both);
     });
+    Ok(())
+}
+
+/// A `Headers` message: each header's context is checked under the lock, its work claim (the expensive
+/// part, ~20 ms for TNet v1) is verified without it, then it is inserted. Continues the download.
+fn handle_headers(shared: &Shared, peer: u64, bytes: &[u8]) -> Result<(), &'static str> {
+    let net = shared.lock().unwrap().chain.net.clone();
+    let mut r = Reader::new(bytes);
+    let n = r.varint(MAX_HEADERS as u64).map_err(|_| "malformed headers")? as usize;
+    let mut list = Vec::with_capacity(n);
+    for _ in 0..n {
+        let h = Header::decode(&mut r).map_err(|_| "malformed headers")?;
+        let c = Claim::decode(&mut r, net.tnet.w).map_err(|_| "malformed headers")?;
+        list.push((h, c));
+    }
+    r.finish().map_err(|_| "malformed headers")?;
+    let mut last_height = 0;
+    for (h, c) in list {
+        let (epoch, threads) = {
+            let mut st = shared.lock().unwrap();
+            match st.headers.check_context(&h, &c, now()) {
+                Ok(None) => continue,
+                Ok(Some(seed)) => {
+                    let threads = st.headers.threads();
+                    (st.chain.epoch(&seed), threads)
+                }
+                Err(Error::UnknownParent) => {
+                    // the peer's chain forks below what it was asked for: ask again from our headers
+                    let loc = st.headers.locator();
+                    st.send(peer, Msg::GetHeaders(loc));
+                    return Ok(());
+                }
+                Err(Error::Invalid("time too far in the future")) => return Ok(()),
+                Err(_) => return Err("invalid header"),
+            }
+        };
+        verify_claim(&net, &epoch, &h, &c, threads).map_err(|_| "invalid header")?;
+        last_height = h.height;
+        shared.lock().unwrap().headers.insert_verified(h, c);
+    }
+    let mut st = shared.lock().unwrap();
+    if let Some(p) = st.peers.get_mut(&peer) {
+        p.height = p.height.max(last_height);
+    }
+    if n == MAX_HEADERS {
+        let loc = st.headers.locator();
+        st.send(peer, Msg::GetHeaders(loc));
+    }
+    st.schedule_downloads();
     Ok(())
 }
 
@@ -508,11 +681,19 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     }
     let mut index = TxIndex::default();
     index.sync(&chain);
+    let mut headers = HeaderChain::new(cfg.net.clone(), cfg.threads);
+    headers.set_max_reorg(cfg.max_reorg);
+    for h in 1..=chain.height() {
+        let b = chain.block(&chain.active_id(h).unwrap()).unwrap();
+        headers.add_valid(&b.header, &b.claim);
+    }
     let allow_local = cfg.net.name == "regtest";
     let listener = TcpListener::bind(cfg.listen)?;
     let p2p = listener.local_addr()?;
     let state = State {
         chain,
+        headers,
+        inflight: HashMap::new(),
         mempool: Mempool::default(),
         index,
         book: AddrBook::load(Some(dir.join("peers.txt")), allow_local),
@@ -613,6 +794,7 @@ fn connection_manager(
             }
         }
         let t = now();
+        shared.lock().unwrap().expire_downloads();
         if t >= last_ping + PING_EVERY {
             last_ping = t;
             shared.lock().unwrap().broadcast(&Msg::Ping(t), None);

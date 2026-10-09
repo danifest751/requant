@@ -117,6 +117,7 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "agent": agent(),
                 "network": st.chain.net.name,
                 "height": st.chain.height(),
+                "headers": st.headers.height(),
                 "tip": hex(&st.chain.tip()),
                 "issued_atoms": st.chain.issued(),
                 "peers": peers.len(),

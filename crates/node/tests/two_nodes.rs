@@ -239,3 +239,40 @@ fn orphan_pool_is_bounded() {
     let _ = st.process_block(far, Some(8));
     assert_eq!(st.orphan_count().0, count);
 }
+
+#[test]
+fn headers_first_sync_from_two_peers() {
+    let (da, db, dc) = (datadir("ha"), datadir("hb"), datadir("hc"));
+    let miner = SigningKey::from_bytes(&[9; 32]);
+    let a = start(Config {
+        net: Network::regtest(),
+        datadir: da.clone(),
+        listen: "127.0.0.1:0".parse().unwrap(),
+        rpc: Some("127.0.0.1:0".parse().unwrap()),
+        rpc_token: None,
+        connect: vec![],
+        mine_to: Some(addr(&miner)),
+        mine_interval: Duration::from_millis(0),
+        threads: 1,
+        max_reorg: 1000,
+        peer_interval: Duration::from_millis(300),
+        discover: false,
+        explorer: None,
+    })
+    .unwrap();
+    wait("a to mine 150 blocks", 120, || height(&a) >= 150);
+    a.stop.store(true, Ordering::Relaxed);
+    let b = node(&db, vec![a.p2p.to_string()], None);
+    wait("b to sync", 120, || height(&b) == height(&a));
+    // c learns 150 headers, verifies their claims, and downloads bodies from a and b in parallel
+    let c = node(&dc, vec![a.p2p.to_string(), b.p2p.to_string()], None);
+    wait("c to sync", 120, || height(&c) == height(&a));
+    let tip_a = a.shared.lock().unwrap().chain.tip();
+    {
+        let st = c.shared.lock().unwrap();
+        assert_eq!(st.headers.height(), st.chain.height());
+        assert_eq!(st.chain.tip(), tip_a);
+    } // release c's lock before asking c over RPC
+    let info = request(c.rpc.unwrap(), "getinfo", json!([])).unwrap();
+    assert_eq!(info["headers"], height(&a));
+}

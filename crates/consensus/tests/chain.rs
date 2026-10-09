@@ -345,3 +345,71 @@ fn upcoming_epochs_are_announced_after_the_anchor() {
     assert!(chain.has_epoch(&seeds[1]));
     assert!(std::sync::Arc::ptr_eq(&chain.epoch(&seeds[1]), &e));
 }
+
+#[test]
+fn headers_first() {
+    use requant_consensus::headers::HeaderChain;
+    // a source chain with a side branch
+    let mut src = Chain::new(Network::regtest(), 1);
+    let alice = addr(&key(1));
+    let mut blocks = Vec::new();
+    for _ in 0..20 {
+        blocks.push(extend(&mut src, &alice, vec![]));
+    }
+
+    // headers alone reproduce the best chain, verifying every claim
+    let mut weights = Chain::new(Network::regtest(), 1); // provides epoch weights
+    let mut hc = HeaderChain::new(Network::regtest(), 1);
+    for b in &blocks {
+        assert_eq!(hc.accept(b.header, b.claim.clone(), NOW, &mut |s: &Hash| weights.epoch(s)), Ok(true));
+    }
+    assert_eq!(hc.height(), 20);
+    assert_eq!(hc.tip(), src.tip());
+    assert_eq!(hc.accept(blocks[3].header, blocks[3].claim.clone(), NOW, &mut |s: &Hash| weights.epoch(s)), Ok(false));
+    assert_eq!(hc.locator()[0], src.tip());
+
+    // a tampered claim or a wrong target is refused
+    let src_tip = src.tip();
+    let mut b = block_on(&mut src, &src_tip, &alice, vec![]);
+    let good = b.clone();
+    b.claim.piece[0] = b.claim.piece[0].wrapping_add(1);
+    assert!(hc.accept(b.header, b.claim, NOW, &mut |s: &Hash| weights.epoch(s)).is_err());
+    let mut t = good.clone();
+    t.header.target = t.header.target.mul_shift(1, -1).unwrap();
+    assert!(hc.accept(t.header, t.claim, NOW, &mut |s: &Hash| weights.epoch(s)).is_err());
+
+    // bodies along the header chain are accepted without recomputing the claims
+    let mut dst = Chain::new(Network::regtest(), 1);
+    for id in hc.best_ids(1, hc.height()) {
+        let b = src.block(&id).unwrap();
+        assert!(dst.accept_prevalidated((*b).clone(), NOW).is_ok());
+    }
+    assert_eq!(dst.tip(), src.tip());
+
+    // a heavier branch from height 18 moves the best header chain; marking it invalid moves it back
+    let fork_at = src.active_id(18).unwrap();
+    let s1 = block_on(&mut src, &fork_at, &addr(&key(2)), vec![]);
+    let s1_id = s1.id(&src.net);
+    src.accept(s1.clone(), NOW).unwrap();
+    let s2 = block_on(&mut src, &s1_id, &addr(&key(2)), vec![]);
+    src.accept(s2.clone(), NOW).unwrap();
+    let s2_id = s2.id(&src.net);
+    let s3 = block_on(&mut src, &s2_id, &addr(&key(2)), vec![]);
+    src.accept(s3.clone(), NOW).unwrap();
+    for b in [&s1, &s2, &s3] {
+        assert_eq!(hc.accept(b.header, b.claim.clone(), NOW, &mut |s: &Hash| weights.epoch(s)), Ok(true));
+    }
+    assert_eq!(hc.height(), 21);
+    assert_eq!(hc.tip(), s3.id(&src.net));
+    hc.mark_invalid(&s1_id);
+    assert_eq!(hc.height(), 20);
+    assert_eq!(hc.tip(), blocks[19].id(&src.net));
+    assert!(!hc.contains(&s3.id(&src.net)));
+
+    // headers of blocks accepted elsewhere can be added without verification
+    let mut hc2 = HeaderChain::new(Network::regtest(), 1);
+    for b in &blocks {
+        hc2.add_valid(&b.header, &b.claim);
+    }
+    assert_eq!(hc2.tip(), blocks[19].id(&src.net));
+}
