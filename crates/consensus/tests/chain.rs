@@ -308,3 +308,40 @@ fn trusted_replay_locator_and_spend_checks() {
     let bob_steals = spend(&chain, &key(2), op, &addr(&key(2)), 5000);
     assert_eq!(chain.check_spend(&bob_steals), Err(Error::Invalid("input key does not match the output")));
 }
+
+#[test]
+fn reorg_limit_refuses_deep_forks() {
+    let mut chain = Chain::new(Network::regtest(), 1);
+    chain.set_max_reorg(3);
+    let alice = addr(&key(1));
+    let mut ids = vec![chain.tip()];
+    for _ in 0..6 {
+        let b = extend(&mut chain, &alice, vec![]);
+        ids.push(b.id(&chain.net));
+    }
+    // tip at 6: a fork from height 2 (depth 4) is refused before any work is checked
+    let deep = block_on(&mut chain, &ids[2], &addr(&key(2)), vec![]);
+    assert_eq!(chain.accept(deep, NOW), Err(Error::Invalid("fork deeper than the reorg limit")));
+    // a fork from height 3 (depth 3) is kept as a side chain
+    let ok = block_on(&mut chain, &ids[3], &addr(&key(2)), vec![]);
+    assert_eq!(chain.accept(ok, NOW), Ok(Accepted::SideChain));
+}
+
+#[test]
+fn upcoming_epochs_are_announced_after_the_anchor() {
+    let net = Network::regtest();
+    let (len, back) = (net.epoch_len, net.lookback);
+    let mut chain = Chain::new(net, 1);
+    assert_eq!(chain.upcoming_epoch_seeds().len(), 1);
+    while chain.height() < len - back {
+        extend(&mut chain, &addr(&key(1)), vec![]);
+    }
+    let seeds = chain.upcoming_epoch_seeds();
+    assert_eq!(seeds.len(), 2);
+    assert_eq!(seeds[1], chain.epoch_seed(&chain.tip(), len));
+    // precomputed weights are used as they are
+    let e = std::sync::Arc::new(tnet::Epoch::from_seed(&seeds[1], chain.net.tnet));
+    chain.insert_epoch(seeds[1], e.clone());
+    assert!(chain.has_epoch(&seeds[1]));
+    assert!(std::sync::Arc::ptr_eq(&chain.epoch(&seeds[1]), &e));
+}

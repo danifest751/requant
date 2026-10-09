@@ -39,6 +39,13 @@ pub struct Config {
     pub mine_interval: Duration,
     /// Threads for verifying work claims.
     pub threads: usize,
+    /// Refuse forks deeper than this below the tip (node policy; see `Chain::set_max_reorg`).
+    pub max_reorg: u64,
+}
+
+/// Default reorg limit: one epoch (a day on the test network).
+pub fn default_max_reorg(net: &Network) -> u64 {
+    net.epoch_len.max(100)
 }
 
 struct Peer {
@@ -304,6 +311,7 @@ pub fn connect(shared: &Shared, addr: &str) -> io::Result<()> {
 pub fn start(cfg: Config) -> io::Result<Handle> {
     let (store, records) = Store::open(&cfg.datadir.join(cfg.net.name))?;
     let mut chain = Chain::new(cfg.net.clone(), cfg.threads);
+    chain.set_max_reorg(cfg.max_reorg);
     let mut replayed = 0;
     for rec in records {
         match Block::decode(&rec, &cfg.net)
@@ -348,11 +356,37 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         Some(a) => Some(crate::rpc::serve(shared.clone(), a)?),
         None => None,
     };
+    {
+        let (shared, stop) = (shared.clone(), stop.clone());
+        std::thread::spawn(move || epoch_preparer(shared, stop));
+    }
     if let Some(payee) = cfg.mine_to {
         let (shared, stop, interval) = (shared.clone(), stop.clone(), cfg.mine_interval);
         std::thread::spawn(move || cpu_miner(shared, payee, stop, interval));
     }
     Ok(Handle { shared, p2p, rpc, stop })
+}
+
+/// Derive the weights of the current and the next epoch off the lock, as soon as their seeds are known,
+/// so block verification never waits for a derivation (7 s per epoch for TNet v1).
+fn epoch_preparer(shared: Shared, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::Relaxed) {
+        let (missing, params) = {
+            let st = shared.lock().unwrap();
+            let seeds: Vec<Hash> =
+                st.chain.upcoming_epoch_seeds().into_iter().filter(|s| !st.chain.has_epoch(s)).collect();
+            (seeds, st.chain.net.tnet)
+        };
+        for seed in missing {
+            let t = std::time::Instant::now();
+            let epoch = Arc::new(tnet::Epoch::from_seed(&seed, params));
+            shared.lock().unwrap().chain.insert_epoch(seed, epoch);
+            if params.n > 1024 {
+                eprintln!("epoch weights prepared in {:.1} s", t.elapsed().as_secs_f64());
+            }
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
 }
 
 /// Mine on the tip, restarting when it changes. Practical for small work functions only.

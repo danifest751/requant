@@ -1,10 +1,10 @@
 //! `requantd`: the Requant full node.
 //!
 //! requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...
-//!          [--mine PKH_HEX] [--mine-interval-ms N] [--threads N]
+//!          [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
 
 use requant_consensus::params::Network;
-use requant_node::node::{start, Config};
+use requant_node::node::{default_max_reorg, start, Config};
 use requant_node::rpc::unhex;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ fn main() {
     let mut net = Network::regtest();
     let (mut datadir, mut listen, mut rpc) = ("requant-data".to_string(), None, None);
     let (mut connect, mut mine_to, mut interval, mut threads) = (Vec::new(), None, 1000u64, 4usize);
+    let mut max_reorg = None::<u64>;
     let mut k = 0;
     let value = |k: usize| args.get(k + 1).cloned().unwrap_or_else(|| usage(&format!("{} needs a value", args[k])));
     while k < args.len() {
@@ -31,6 +32,7 @@ fn main() {
             }
             "--mine-interval-ms" => interval = value(k).parse().unwrap_or_else(|_| usage("bad interval")),
             "--threads" => threads = value(k).parse().unwrap_or_else(|_| usage("bad thread count")),
+            "--max-reorg" => max_reorg = Some(value(k).parse().unwrap_or_else(|_| usage("bad --max-reorg"))),
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
         }
@@ -39,6 +41,7 @@ fn main() {
     let default_port = if net.name == "test" { 19333 } else { 19444 };
     let listen = listen.unwrap_or_else(|| format!("0.0.0.0:{default_port}"));
     let rpc = rpc.unwrap_or_else(|| format!("127.0.0.1:{}", default_port + 1));
+    let max_reorg = max_reorg.unwrap_or_else(|| default_max_reorg(&net));
     let cfg = Config {
         net,
         datadir: datadir.into(),
@@ -48,6 +51,7 @@ fn main() {
         mine_to,
         mine_interval: Duration::from_millis(interval),
         threads,
+        max_reorg,
     };
     let net_name = cfg.net.name;
     match start(cfg) {
@@ -72,7 +76,7 @@ fn usage(msg: &str) -> ! {
     }
     eprintln!(
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
-         \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N]"
+         \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]"
     );
     std::process::exit(2)
 }

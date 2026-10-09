@@ -59,6 +59,8 @@ pub struct Chain {
     epochs: Vec<(Hash, Arc<tnet::Epoch>)>,
     /// Reason the last block marked invalid failed to connect.
     last_failure: &'static str,
+    /// Node policy: refuse blocks forking more than this many blocks below the tip (no limit by default).
+    max_reorg: u64,
 }
 
 const EPOCH_CACHE: usize = 3;
@@ -84,6 +86,7 @@ impl Chain {
             undo: HashMap::new(),
             epochs: Vec::new(),
             last_failure: "",
+            max_reorg: u64::MAX,
         };
         c.entries.insert(id, entry);
         c.undo.insert(id, Vec::new());
@@ -225,6 +228,53 @@ impl Chain {
         tagged("requant/epoch", &[&e.to_le_bytes(), &anchor])
     }
 
+    /// Refuse blocks whose branch leaves the best chain more than `depth` blocks below the tip. This is a
+    /// node policy, not a consensus rule: it bounds the work an attacker can make the node do with a cheap
+    /// fork from old, low-difficulty history, at the price of manual recovery after a longer partition.
+    pub fn set_max_reorg(&mut self, depth: u64) {
+        self.max_reorg = depth;
+    }
+
+    /// Height where the branch ending at `id` joins the best chain, if within `limit` steps.
+    fn fork_height(&self, id: &Hash, limit: u64) -> Option<u64> {
+        let mut id = *id;
+        for _ in 0..=limit.min(self.height() + 1) {
+            if self.on_active(&id) {
+                return Some(self.entries[&id].height);
+            }
+            id = self.entries[&id].block.header.prev;
+        }
+        None
+    }
+
+    /// Seeds of the epoch of the next block and, once its anchor block is in the best chain, of the epoch
+    /// after it, so a node can derive weights before they are needed.
+    pub fn upcoming_epoch_seeds(&self) -> Vec<Hash> {
+        let next = self.height() + 1;
+        let tip = self.tip();
+        let mut v = vec![self.epoch_seed(&tip, next)];
+        let following = (next / self.net.epoch_len + 1) * self.net.epoch_len;
+        if self.height() >= following - self.net.lookback {
+            v.push(self.epoch_seed(&tip, following));
+        }
+        v
+    }
+
+    pub fn has_epoch(&self, seed: &Hash) -> bool {
+        self.epochs.iter().any(|(s, _)| s == seed)
+    }
+
+    /// Add weights derived elsewhere (e.g. on a background thread) to the cache.
+    pub fn insert_epoch(&mut self, seed: Hash, epoch: Arc<tnet::Epoch>) {
+        if self.has_epoch(&seed) {
+            return;
+        }
+        if self.epochs.len() == EPOCH_CACHE {
+            self.epochs.remove(0);
+        }
+        self.epochs.push((seed, epoch));
+    }
+
     /// Epoch weights for `seed`, derived on first use and kept in a small cache.
     pub fn epoch(&mut self, seed: &Hash) -> Arc<tnet::Epoch> {
         if let Some(k) = self.epochs.iter().position(|(s, _)| s == seed) {
@@ -247,6 +297,14 @@ impl Chain {
         if parent.status == Status::Invalid {
             return Err(Error::Invalid("invalid parent"));
         }
+        if self.max_reorg != u64::MAX {
+            let tip = self.height();
+            match self.fork_height(&h.prev, self.max_reorg) {
+                Some(f) if tip - f.min(tip) <= self.max_reorg => {}
+                _ => return Err(Error::Invalid("fork deeper than the reorg limit")),
+            }
+        }
+        let parent = &self.entries[&h.prev];
         if h.height != parent.height + 1 {
             return Err(Error::Invalid("height"));
         }

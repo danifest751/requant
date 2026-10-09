@@ -42,9 +42,9 @@ test network.
       `rqrt1`), balance, send. Next: spending unconfirmed change, several payments per block, encrypted
       key files, hardware wallets.
 - [ ] Headers-first sync; peer discovery and address gossip; persistent ban list.
-- [ ] Deep-fork protection: a low-difficulty fork far below the tip costs little work and, at an epoch
-      boundary, a weight derivation (7 s); limit reorg depth or require minimum chain work.
-- [ ] Derive the next epoch's weights in the background (now under the node lock).
+- [x] Deep-fork protection: forks more than `--max-reorg` blocks below the tip (default one epoch) are
+      refused before their work is checked (node policy; recovery after a longer partition is manual).
+- [x] The current and next epoch's weights are derived on a background thread once their seeds are known.
 - [ ] Keep a UTXO snapshot instead of replaying all blocks on start; transaction index.
 - [ ] Return transactions of disconnected blocks to the pool after a reorg.
 - [ ] RPC authentication (now: no auth, bind to localhost only).

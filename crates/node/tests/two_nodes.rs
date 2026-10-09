@@ -30,6 +30,7 @@ fn node(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>) -> Handle {
         mine_to,
         mine_interval: Duration::from_millis(30),
         threads: 1,
+        max_reorg: 100,
     })
     .unwrap()
 }
