@@ -5,7 +5,8 @@ network: the arithmetic that GPU tensor cores and AI inference accelerators are 
 is the step that makes the work hard to shortcut: exact integer **requant**ization between layers.
 The work function is called **TNet**.
 
-**Status: pre-alpha; a public test network is running** ([`TESTNET.md`](TESTNET.md)). The work
+**Status: pre-alpha; a public test network is running** ([`TESTNET.md`](TESTNET.md), explorer
+http://193.187.93.29:19380/). The work
 function (**TNet v1**) is frozen with test vectors and reference implementations; a node, a wallet and a GPU
 miner exist; there is no main network and the test coins have no value. See [`ROADMAP.md`](ROADMAP.md).
 Nothing here is a security or investment claim.
