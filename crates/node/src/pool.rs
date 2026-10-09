@@ -411,7 +411,9 @@ fn maintain(st: &mut State, pool: &mut Pool) {
     let mut keep = Vec::new();
     for c in std::mem::take(&mut pool.immature) {
         let on_chain = st.chain.active_id(c.height) == Some(c.block);
-        if on_chain && next - c.height < maturity {
+        // a block that left the chain may come back with a reorganisation: it is given up only once the chain
+        // has gone `maturity` blocks past it
+        if next.saturating_sub(c.height) < maturity {
             keep.push(c);
             continue;
         }

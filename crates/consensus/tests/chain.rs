@@ -328,6 +328,47 @@ fn reorg_limit_refuses_deep_forks() {
 }
 
 #[test]
+fn reorg_limit_waits_for_min_chain_work() {
+    // a node still below the known chain work (syncing) follows any fork with more work
+    let mut net = Network::regtest();
+    net.min_chain_work = requant_consensus::u256::U256::MAX;
+    let mut chain = Chain::new(net, 1);
+    chain.set_max_reorg(3);
+    let alice = addr(&key(1));
+    let mut ids = vec![chain.tip()];
+    for _ in 0..6 {
+        let b = extend(&mut chain, &alice, vec![]);
+        ids.push(b.id(&chain.net));
+    }
+    let deep = block_on(&mut chain, &ids[2], &addr(&key(2)), vec![]);
+    assert_eq!(chain.accept(deep, NOW), Ok(Accepted::SideChain));
+}
+
+#[test]
+fn cheap_checks_come_first() {
+    let mut chain = Chain::new(Network::regtest(), 1);
+    let alice = key(1);
+    let b1 = extend(&mut chain, &addr(&alice), vec![]);
+    for _ in 0..chain.net.maturity {
+        extend(&mut chain, &addr(&key(9)), vec![]);
+    }
+    let op = OutPoint { txid: b1.txs[0].txid(), vout: 0 };
+    let mut tx = spend(&chain, &alice, op, &addr(&key(2)), 5);
+    if let Tx::Transfer { inputs, .. } = &mut tx {
+        inputs[0].sig[0] ^= 1;
+    }
+    // unknown parent is reported before the (expensive) signature check
+    let tip = chain.tip();
+    let mut b = block_on(&mut chain, &tip, &addr(&key(3)), vec![tx]);
+    b.header.prev = [7; 32];
+    assert_eq!(chain.accept(b.clone(), NOW), Err(Error::UnknownParent));
+    // an out-of-range claim is refused before any epoch weights are touched
+    let mut b = block_on(&mut chain, &tip, &addr(&key(3)), vec![]);
+    b.claim.i = chain.net.tnet.b as u32;
+    assert_eq!(chain.accept(b, NOW), Err(Error::Invalid("claim index")));
+}
+
+#[test]
 fn upcoming_epochs_are_announced_after_the_anchor() {
     let net = Network::regtest();
     let (len, back) = (net.epoch_len, net.lookback);
@@ -412,4 +453,51 @@ fn headers_first() {
         hc2.add_valid(&b.header, &b.claim);
     }
     assert_eq!(hc2.tip(), blocks[19].id(&src.net));
+}
+
+/// Two chained transfers inside one block: A pays bob, B spends A's output.
+fn chained_pair(chain: &Chain, alice: &SigningKey, bob: &SigningKey, op: OutPoint) -> (Tx, Tx) {
+    let a = spend(chain, alice, op, &addr(bob), 50_000);
+    let mut b = Tx::Transfer {
+        inputs: vec![Input { prev: OutPoint { txid: a.txid(), vout: 0 }, pubkey: [0; 32], sig: [0; 64] }],
+        outputs: vec![Output { value: 40_000, pkh: addr(&key(3)) }],
+    };
+    b.sign(&chain.net.chain_id, &[bob]);
+    (a, b)
+}
+
+#[test]
+fn undo_restores_exactly_after_reorg_and_failed_connect() {
+    let mut chain = Chain::new(Network::regtest(), 1);
+    let (alice, bob) = (key(1), key(2));
+    let first = extend(&mut chain, &addr(&alice), vec![]);
+    extend(&mut chain, &addr(&alice), vec![]);
+    let op = OutPoint { txid: first.txs[0].txid(), vout: 0 };
+    let before: Vec<_> = [addr(&alice), addr(&bob), addr(&key(3))].iter().map(|o| chain.coins_of(o)).collect();
+    let fork_point = chain.tip();
+
+    // failed connect: [coinbase, A, B, C with a missing input] must leave the UTXO set untouched
+    let (a, b) = chained_pair(&chain, &alice, &bob, op);
+    let mut c = Tx::Transfer {
+        inputs: vec![Input { prev: OutPoint { txid: [7; 32], vout: 0 }, pubkey: [0; 32], sig: [0; 64] }],
+        outputs: vec![Output { value: 1, pkh: addr(&bob) }],
+    };
+    c.sign(&chain.net.chain_id, &[&bob]);
+    let bad = block_on(&mut chain, &fork_point, &addr(&alice), vec![a.clone(), b.clone(), c]);
+    assert!(chain.accept(bad, NOW).is_err());
+    assert!(chain.coin(&OutPoint { txid: a.txid(), vout: 0 }).is_none(), "phantom output after a failed connect");
+    let after: Vec<_> = [addr(&alice), addr(&bob), addr(&key(3))].iter().map(|o| chain.coins_of(o)).collect();
+    assert_eq!(before, after);
+
+    // reorg: a block with A and B is disconnected by a heavier branch without them
+    let good = block_on(&mut chain, &fork_point, &addr(&alice), vec![a.clone(), b]);
+    assert_eq!(chain.accept(good, NOW), Ok(Accepted::NewTip));
+    let s1 = block_on(&mut chain, &fork_point, &addr(&key(4)), vec![]);
+    let s1_id = s1.id(&chain.net);
+    chain.accept(s1, NOW).unwrap();
+    let s2 = block_on(&mut chain, &s1_id, &addr(&key(4)), vec![]);
+    assert!(matches!(chain.accept(s2, NOW), Ok(Accepted::Reorg { disconnected: 1 })));
+    assert!(chain.coin(&OutPoint { txid: a.txid(), vout: 0 }).is_none(), "phantom output after a reorg");
+    assert!(chain.coin(&op).is_some(), "the spent coin is back");
+    assert!(chain.coins_of(&addr(&key(3))).is_empty());
 }

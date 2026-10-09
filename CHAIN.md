@@ -16,7 +16,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 
 ## 2. Networks
 
-| | main | test | regtest |
+| | main (planned, not in the code yet) | test | regtest |
 |---|---|---|---|
 | name (for `chain_id`) | `main` | `test` | `regtest` |
 | work function | TNet v1 | TNet v1 | TNet `n = 256, B = 64, L = 4, w = 64, M = 14170` |
@@ -24,7 +24,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 | ASERT half-life `tau` | 7200 s | 7200 s | 7200 s |
 | epoch length `E` / look-back `K` | 1440 / 60 | 1440 / 60 | 16 / 4 |
 | `pow_limit` (largest target) | `2^240 - 1` | `2^248 - 1` | `2^255 - 1` |
-| genesis target | set at launch | `2^229` | `pow_limit` |
+| genesis target | set at launch | `2^229 - 1` | `pow_limit` |
 | coinbase maturity | 100 | 100 | 2 |
 | development fund (§8) | 6%, heights 1..2^21, key set at launch | same, `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` | 6%, heights 1..8, public test key |
 
@@ -56,8 +56,8 @@ output   = LE64 value || pkh[32]                    pkh = H("requant/pkh", pubke
 
 - `txid = H("requant/txid", tx with every signature omitted)`; `wtxid = H("requant/wtxid", tx)`.
   Outputs are referenced by `(txid, vout)`, so signatures cannot change a reference.
-- Input `k` carries an ed25519 signature (RFC 8032, strict verification: canonical `S`, no small-order
-  keys) of `H("requant/sighash", chain_id || txid || LE32 k)` by `pubkey`, and `H("requant/pkh", pubkey)`
+- Input `k` carries an ed25519 signature (RFC 8032 with strict verification as in ed25519-dalek's
+  `verify_strict`: `S` reduced below the group order, public key and `R` not of small order) of `H("requant/sighash", chain_id || txid || LE32 k)` by `pubkey`, and `H("requant/pkh", pubkey)`
   must equal the `pkh` of the output it spends.
 - `version` is 1. A transfer has at least one input and one output, no repeated outpoint, outputs
   of at least 1 atom, and `sum(outputs) <= sum(inputs)`; the difference is the fee.
@@ -83,10 +83,12 @@ A block is valid when, against its parent:
 6. every transfer is valid (section 4) against the outputs created by earlier blocks and earlier
    transactions of the same block, spends each output once, and spends coinbase outputs only after
    `maturity` blocks (`spending height - creating height >= maturity`);
-7. coinbase outputs total at most `reward(height) + fees`.
+7. coinbase outputs total at most `reward(height) + fees`, and every output, the coinbase's included, is
+   at least 1 atom (a coinbase may have no outputs at all).
 
 The best chain is the valid chain with the greatest cumulative work, `work(target) = floor(2^256 /
-(target + 1))`; on a tie the first seen is kept.
+(target + 1))`; on a tie the current best chain is kept. When the best chain itself turns out invalid,
+the remaining chain with the most work is chosen, ties going to the lowest `block_id`.
 
 ## 6. Epochs
 

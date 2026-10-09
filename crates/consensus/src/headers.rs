@@ -4,7 +4,7 @@
 //! ([`crate::chain::Chain::accept_prevalidated`]). About 400 bytes per block.
 
 use crate::block::{block_id, genesis, Claim, Header, BLOCK_VERSION};
-use crate::chain::{epoch_seed, verify_claim};
+use crate::chain::{claim_hash_ok, epoch_seed, verify_claim, DEEP_FORK};
 use crate::params::{Network, MAX_FUTURE_SECS, MTP_WINDOW};
 use crate::pow::next_target;
 use crate::tx::Hash;
@@ -192,7 +192,8 @@ impl HeaderChain {
         if header.height != p_height + 1 {
             return Err(Error::Invalid("height"));
         }
-        if self.max_reorg != u64::MAX {
+        // as in the block chain: no limit while syncing (tip below `min_chain_work`)
+        if self.max_reorg != u64::MAX && self.entries[&self.tip()].work >= self.net.min_chain_work {
             let mut cur = header.prev;
             let mut steps = 0;
             while !self.on_best(&cur) && steps <= self.max_reorg {
@@ -201,7 +202,7 @@ impl HeaderChain {
             }
             let fork = self.entries[&cur].header.height;
             if !self.on_best(&cur) || self.height().saturating_sub(fork) > self.max_reorg {
-                return Err(Error::Invalid("fork deeper than the reorg limit"));
+                return Err(Error::Invalid(DEEP_FORK));
             }
         }
         if header.time <= self.median_time_past(&header.prev) {
@@ -213,6 +214,7 @@ impl HeaderChain {
         if header.target != next_target(&self.net, p_height, p_time) {
             return Err(Error::Invalid("target"));
         }
+        claim_hash_ok(&self.net, header, claim)?;
         Ok(Some(epoch_seed(&self.net, header.height, |h| self.ancestor(&header.prev, h))))
     }
 
@@ -239,20 +241,17 @@ impl HeaderChain {
         if self.entries.get(id).is_none_or(|e| e.header.height == 0) {
             return;
         }
-        self.entries.remove(id);
-        loop {
-            let orphaned: Vec<Hash> = self
-                .entries
-                .iter()
-                .filter(|(_, e)| e.header.height > 0 && !self.entries.contains_key(&e.header.prev))
-                .map(|(k, _)| *k)
-                .collect();
-            if orphaned.is_empty() {
-                break;
+        // one pass over the entries for a parent -> children map, then remove the subtree breadth first
+        let mut children: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        for (k, e) in &self.entries {
+            if e.header.height > 0 {
+                children.entry(e.header.prev).or_default().push(*k);
             }
-            for k in orphaned {
-                self.entries.remove(&k);
-            }
+        }
+        let mut queue = vec![*id];
+        while let Some(k) = queue.pop() {
+            self.entries.remove(&k);
+            queue.extend(children.remove(&k).unwrap_or_default());
         }
         let best =
             self.entries.iter().max_by(|a, b| a.1.work.cmp(&b.1.work).then(b.0.cmp(a.0))).map(|(k, _)| *k).unwrap();

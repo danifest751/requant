@@ -63,7 +63,12 @@ pub struct Chain {
     disconnected: Vec<Arc<Block>>,
     /// Node policy: refuse blocks forking more than this many blocks below the tip (no limit by default).
     max_reorg: u64,
+    /// The reorganisation limit applies only once the tip has this much cumulative work.
+    min_chain_work: U256,
 }
+
+/// Rejection reason for a fork below the reorganisation limit: node policy, so peers are not punished for it.
+pub const DEEP_FORK: &str = "fork deeper than the reorg limit";
 
 /// Current and next epoch (512 MiB each for TNet v1).
 const EPOCH_CACHE: usize = 2;
@@ -80,6 +85,7 @@ impl Chain {
             status: Status::Valid,
             block: Arc::new(g),
         };
+        let min_chain_work = net.min_chain_work;
         let mut c = Chain {
             net,
             threads: threads.max(1),
@@ -91,6 +97,7 @@ impl Chain {
             last_failure: "",
             disconnected: Vec::new(),
             max_reorg: u64::MAX,
+            min_chain_work,
         };
         c.entries.insert(id, entry);
         c.undo.insert(id, Vec::new());
@@ -301,11 +308,13 @@ impl Chain {
         if parent.status == Status::Invalid {
             return Err(Error::Invalid("invalid parent"));
         }
-        if self.max_reorg != u64::MAX {
+        // the reorg limit protects a synced node only: before its tip has `min_chain_work`, a cheap chain seen
+        // first must not lock it out of the real one
+        if self.max_reorg != u64::MAX && self.tip_work() >= self.min_chain_work {
             let tip = self.height();
             match self.fork_height(&h.prev, self.max_reorg) {
                 Some(f) if tip - f.min(tip) <= self.max_reorg => {}
-                _ => return Err(Error::Invalid("fork deeper than the reorg limit")),
+                _ => return Err(Error::Invalid(DEEP_FORK)),
             }
         }
         let parent = &self.entries[&h.prev];
@@ -325,6 +334,8 @@ impl Chain {
         if verify != Verify::Full {
             return Ok(());
         }
+        // the cheap part of the claim (one hash) before deriving any epoch weights
+        claim_hash_ok(&self.net, h, &block.claim)?;
         let seed = self.epoch_seed(&h.prev, h.height);
         let epoch = self.epoch(&seed);
         verify_claim(&self.net, &epoch, h, &block.claim, self.threads)
@@ -352,8 +363,10 @@ impl Chain {
         if self.entries.contains_key(&id) {
             return Err(Error::Duplicate);
         }
-        block.check_standalone(&self.net)?;
+        // cheapest first: structure, parent and header context, the claim (real work), then signatures
+        block.check_structure(&self.net)?;
         self.check_header(&block, now, verify)?;
+        block.txs.iter().try_for_each(|t| t.check_signatures(&self.net.chain_id))?;
         let parent = &self.entries[&block.header.prev];
         let entry = Entry {
             height: block.header.height,
@@ -365,7 +378,7 @@ impl Chain {
         };
         self.entries.insert(id, entry);
         let before = self.tip();
-        let disconnected = self.activate_best();
+        let disconnected = self.activate_best(Some(id));
         if self.entries[&id].status == Status::Invalid {
             return Err(Error::Invalid(self.last_failure));
         }
@@ -402,20 +415,43 @@ impl Chain {
 
     /// Move to the valid chain with the most work; returns the number of blocks disconnected from the old
     /// best chain on the way.
-    fn activate_best(&mut self) -> usize {
+    /// `new` is the block just stored: the tip had the most work before it arrived, so only `new` can beat it
+    /// (no scan of every block, which made syncing quadratic). After a failed reorganisation every block is
+    /// considered again.
+    fn activate_best(&mut self, new: Option<Hash>) -> usize {
         let mut disconnected_total = 0;
+        let mut fast = new;
         loop {
             let tip_work = self.tip_work();
-            let best = self
-                .entries
-                .iter()
-                .filter(|(_, e)| e.work > tip_work && e.status != Status::Invalid)
-                .map(|(id, e)| (e.work, *id))
-                .filter(|(_, id)| !self.has_invalid_ancestor(id))
-                .max();
-            let Some((_, cand)) = best else { return disconnected_total };
+            let cand = match fast.take() {
+                Some(id) => {
+                    let e = &self.entries[&id];
+                    if e.work > tip_work && e.status != Status::Invalid && !self.has_invalid_ancestor(&id) {
+                        id
+                    } else {
+                        return disconnected_total;
+                    }
+                }
+                None => {
+                    let best = self
+                        .entries
+                        .iter()
+                        .filter(|(_, e)| e.work > tip_work && e.status != Status::Invalid)
+                        .map(|(id, e)| (e.work, std::cmp::Reverse(*id)))
+                        .filter(|(_, id)| !self.has_invalid_ancestor(&id.0))
+                        .max();
+                    // equal work: the lowest block id, as in the header chain (CHAIN.md §5)
+                    let Some((_, std::cmp::Reverse(cand))) = best else { return disconnected_total };
+                    cand
+                }
+            };
             match self.reorg_to(&cand) {
-                Ok(n) => disconnected_total += n,
+                Ok(n) => {
+                    disconnected_total += n;
+                    if new.is_some() {
+                        return disconnected_total;
+                    }
+                }
                 Err((bad, reason)) => {
                     self.entries.get_mut(&bad).unwrap().status = Status::Invalid;
                     self.last_failure = reason;
@@ -515,11 +551,13 @@ impl Chain {
                 Ok(())
             }
             Err(e) => {
-                for op in added {
-                    self.utxo.remove(&op);
-                }
+                // restore what was spent first, then remove what was created: an output created and spent
+                // inside this block is in both lists and must end up absent
                 for (op, coin) in spent {
                     self.utxo.insert(op, coin);
+                }
+                for op in added {
+                    self.utxo.remove(&op);
                 }
                 Err(e)
             }
@@ -539,14 +577,16 @@ impl Chain {
     fn disconnect(&mut self, id: &Hash) {
         assert_eq!(self.tip(), *id, "disconnect only the tip");
         let block = self.entries[id].block.clone();
+        // restore spent coins first, then remove the block's outputs: an output created and spent inside the
+        // block appears in both and must end up absent (the reverse order would resurrect it)
+        for (op, coin) in self.undo.remove(id).unwrap_or_default() {
+            self.utxo.insert(op, coin);
+        }
         for tx in &block.txs {
             let txid = tx.txid();
             for v in 0..tx.outputs().len() {
                 self.utxo.remove(&OutPoint { txid, vout: v as u32 });
             }
-        }
-        for (op, coin) in self.undo.remove(id).unwrap_or_default() {
-            self.utxo.insert(op, coin);
         }
         self.active.pop();
     }
@@ -616,6 +656,22 @@ pub fn epoch_seed(net: &Network, height: u64, ancestor_at: impl FnOnce(u64) -> H
     }
     let anchor = ancestor_at(e * net.epoch_len - net.lookback);
     tagged("requant/epoch", &[&e.to_le_bytes(), &anchor])
+}
+
+/// The part of the claim check that needs no epoch weights: indices, piece length and one ticket hash against
+/// the target. Run first, so a junk claim costs one hash instead of an epoch derivation and a row.
+pub fn claim_hash_ok(net: &Network, h: &Header, c: &Claim) -> Result<(), Error> {
+    let p = net.tnet;
+    if c.i as usize >= p.b || c.c as usize >= p.tickets_per_row() || c.piece.len() != p.w {
+        return Err(Error::Invalid("claim index"));
+    }
+    if !tnet::meets_target(
+        &tnet::ticket_hash(&c.piece, &h.digest(&net.chain_id), c.nonce, c.i, c.c),
+        &h.target.to_be_bytes(),
+    ) {
+        return Err(Error::Invalid("claim above target"));
+    }
+    Ok(())
 }
 
 /// Check a header's TNet work claim against its target with the epoch's weights (SPEC.md §7).

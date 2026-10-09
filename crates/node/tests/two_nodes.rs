@@ -1,6 +1,8 @@
 //! Two regtest nodes on localhost: sync, transaction relay and mining, restart from storage.
 
 use ed25519_dalek::SigningKey;
+use requant_consensus::block::Block;
+use requant_consensus::chain::{claim_hash_ok, mine, Accepted};
 use requant_consensus::params::Network;
 use requant_consensus::tx::{pkh, Hash, Input, OutPoint, Output, Tx};
 use requant_node::node::{start, Config, Handle};
@@ -224,11 +226,19 @@ fn orphan_pool_is_bounded() {
     let n = node(&dir, vec![], None);
     let mut st = n.shared.lock().unwrap();
     let tip = st.chain.tip();
+    let net = st.chain.net.clone();
+    // an orphan is kept only if its ticket hash meets its target (the row itself cannot be checked yet)
+    let with_hash = |mut b: Block| {
+        while claim_hash_ok(&net, &b.header, &b.claim).is_err() {
+            b.claim.nonce += 1;
+        }
+        b
+    };
     for k in 0..100u64 {
         let mut b = st.chain.template_on(&tip, &[1; 32], vec![], 0);
         b.header.prev = [k as u8 + 1; 32]; // unknown parents
         b.header.prev[31] = (k >> 8) as u8;
-        let _ = st.process_block(b, Some(7));
+        let _ = st.process_block(with_hash(b), Some(7));
     }
     let (count, bytes) = st.orphan_count();
     assert_eq!(count, requant_node::node::MAX_ORPHANS_PER_PEER);
@@ -237,8 +247,37 @@ fn orphan_pool_is_bounded() {
     let mut far = st.chain.template_on(&tip, &[1; 32], vec![], 0);
     far.header.prev = [0xee; 32];
     far.header.height = 1_000_000;
-    let _ = st.process_block(far, Some(8));
+    let _ = st.process_block(with_hash(far), Some(8));
     assert_eq!(st.orphan_count().0, count);
+    // nor orphans without the work their header claims
+    let mut junk = st.chain.template_on(&tip, &[1; 32], vec![], 0);
+    junk.header.prev = [0xdd; 32];
+    while claim_hash_ok(&net, &junk.header, &junk.claim).is_ok() {
+        junk.claim.nonce += 1;
+    }
+    assert!(st.process_block(junk, Some(9)).is_err());
+    assert_eq!(st.orphan_count().0, count);
+}
+
+#[test]
+fn junk_body_does_not_kill_a_valid_header() {
+    let dir = datadir("junk");
+    let n = node(&dir, vec![], None);
+    let mut st = n.shared.lock().unwrap();
+    let tip = st.chain.tip();
+    let mut b = st.chain.template_on(&tip, &[1; 32], vec![], st.chain.net.genesis_time + 60);
+    let seed = st.chain.epoch_seed(&tip, 1);
+    let epoch = st.chain.epoch(&seed);
+    b.claim = mine(&st.chain.net, &epoch, &b.header, 0, 1000).unwrap();
+    let id = b.id(&st.chain.net);
+    st.headers.add_valid(&b.header, &b.claim);
+    // the same header with other transactions: refused, but the header stays
+    let mut junk = b.clone();
+    junk.txs.push(junk.txs[0].clone());
+    assert!(st.process_block(junk, Some(7)).is_err());
+    assert!(st.headers.contains(&id));
+    // and the real body is accepted
+    assert_eq!(st.process_block(b, Some(8)), Ok(Some(Accepted::NewTip)));
 }
 
 #[test]

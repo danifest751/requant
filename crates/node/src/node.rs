@@ -7,9 +7,10 @@ use crate::index::TxIndex;
 use crate::mempool::Mempool;
 use crate::msg::{read_msg, write_msg, Msg, HEADERS_PROTOCOL, MAX_ADDR, MAX_HEADERS, MAX_INV, MIN_PROTOCOL, PROTOCOL};
 use crate::store::Store;
+use requant_consensus::block::tx_root;
 use requant_consensus::block::Block;
 use requant_consensus::block::{Claim, Header};
-use requant_consensus::chain::{mine, verify_claim, Accepted, Chain};
+use requant_consensus::chain::{claim_hash_ok, mine, verify_claim, Accepted, Chain, DEEP_FORK};
 use requant_consensus::codec::{Reader, Writer};
 use requant_consensus::headers::HeaderChain;
 use requant_consensus::params::Network;
@@ -20,7 +21,7 @@ use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufReader, BufWriter};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -43,6 +44,12 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const PING_EVERY: u64 = 120;
 /// How long an address that sent invalid data is refused.
 const BAN_SECS: u64 = 3600;
+/// Bytes served for one `GetData` request.
+const MAX_GETDATA_BYTES: usize = 32 << 20;
+/// Bytes queued for a peer that does not read them; beyond this the peer is disconnected.
+const MAX_PEER_QUEUE: usize = 64 << 20;
+/// A write to a peer blocked this long ends the connection.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -92,6 +99,9 @@ pub fn default_max_reorg(net: &Network) -> u64 {
 
 pub struct Peer {
     tx: Sender<Msg>,
+    /// Bytes queued and not yet written; past `MAX_PEER_QUEUE` the connection is closed.
+    queued: Arc<AtomicUsize>,
+    sock: TcpStream,
     pub addr: SocketAddr,
     pub outbound: bool,
     /// Where the peer accepts connections (outbound: `addr`; inbound: its IP and announced port).
@@ -102,6 +112,21 @@ pub struct Peer {
     /// Protocol version from the peer's greeting (0 until it arrives).
     pub protocol: u32,
     inflight: usize,
+}
+
+impl Peer {
+    /// Queue a message for the writer thread; a peer that lets `MAX_PEER_QUEUE` bytes pile up is cut off.
+    fn deliver(&self, m: Msg) {
+        let size = m.approx_size();
+        if self.queued.fetch_add(size, Ordering::Relaxed) + size > MAX_PEER_QUEUE {
+            self.queued.fetch_sub(size, Ordering::Relaxed);
+            let _ = self.sock.shutdown(std::net::Shutdown::Both);
+            return;
+        }
+        if self.tx.send(m).is_err() {
+            self.queued.fetch_sub(size, Ordering::Relaxed);
+        }
+    }
 }
 
 /// Headers-first download: blocks requested at once along the best header chain, per peer, and how long a
@@ -150,14 +175,14 @@ impl State {
     fn broadcast(&self, m: &Msg, except: Option<u64>) {
         for (id, p) in &self.peers {
             if Some(*id) != except {
-                let _ = p.tx.send(m.clone());
+                p.deliver(m.clone());
             }
         }
     }
 
     fn send(&self, peer: u64, m: Msg) {
         if let Some(p) = self.peers.get(&peer) {
-            let _ = p.tx.send(m);
+            p.deliver(m);
         }
     }
 
@@ -243,6 +268,14 @@ impl State {
                 }
                 Err(Error::Duplicate) => {}
                 Err(Error::UnknownParent) => {
+                    // an orphan costs memory: only with a claim that meets its own (bounded) target
+                    let net = &self.chain.net;
+                    if b.header.target > net.pow_limit || claim_hash_ok(net, &b.header, &b.claim).is_err() {
+                        if first.is_none() {
+                            return Err(Error::Invalid("orphan without work"));
+                        }
+                        continue;
+                    }
                     self.add_orphan(id, b, bytes.len(), from);
                     // with a verified header the parent is already being downloaded
                     if let (Some(p), false) = (from, prevalidated) {
@@ -253,10 +286,12 @@ impl State {
                         }
                     }
                 }
-                Err(Error::Invalid("time too far in the future")) => {}
+                // a clock difference or our own reorg policy: not the sender's fault
+                Err(Error::Invalid("time too far in the future")) | Err(Error::Invalid(DEEP_FORK)) => {}
                 Err(e) => {
-                    if prevalidated {
-                        // a valid header with an invalid body: that branch is dead
+                    // a valid header with an invalid body is a dead branch, but only if the body is the one the
+                    // header commits to: anyone can pair a good header with junk transactions
+                    if prevalidated && tx_root(&b.txs) == b.header.tx_root {
                         self.headers.mark_invalid(&id);
                     }
                     if first.is_none() {
@@ -500,11 +535,21 @@ impl State {
                 }
             }
             Msg::GetData(ids) => {
+                // each id once, and at most MAX_GETDATA_BYTES per request (a peer asks again for the rest)
+                let mut seen = HashSet::new();
+                let mut sent = 0usize;
                 for id in ids {
+                    if sent >= MAX_GETDATA_BYTES || !seen.insert(id) {
+                        continue;
+                    }
                     if let Some(b) = self.chain.block(&id) {
-                        self.send(peer, Msg::Block(b.encode()));
+                        let bytes = b.encode();
+                        sent += bytes.len();
+                        self.send(peer, Msg::Block(bytes));
                     } else if let Some(tx) = self.mempool.get(&id) {
-                        self.send(peer, Msg::Tx(tx.encode()));
+                        let bytes = tx.encode();
+                        sent += bytes.len();
+                        self.send(peer, Msg::Tx(bytes));
                     }
                 }
             }
@@ -518,7 +563,7 @@ impl State {
                     p.height = p.height.max(h);
                     // block-by-block sync for peers without headers-first
                     if p.protocol < HEADERS_PROTOCOL && p.inflight == 0 && p.height > ours {
-                        let _ = p.tx.send(Msg::GetBlocks(self.chain.locator()));
+                        p.deliver(Msg::GetBlocks(self.chain.locator()));
                     }
                 }
             }
@@ -547,7 +592,9 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
     let addr = stream.peer_addr()?;
     stream.set_nodelay(true)?;
     stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let (tx, rx) = channel::<Msg>();
+    let queued = Arc::new(AtomicUsize::new(0));
     let (id, hello, magic) = {
         let mut st = shared.lock().unwrap();
         let same_ip = st.peers.values().filter(|p| !p.outbound && p.addr.ip() == addr.ip()).count();
@@ -560,6 +607,8 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
         st.next_peer += 1;
         let peer = Peer {
             tx: tx.clone(),
+            queued: queued.clone(),
+            sock: stream.try_clone()?,
             addr,
             outbound,
             listen: outbound.then_some(addr),
@@ -575,12 +624,19 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
     let mut writer = BufWriter::new(stream.try_clone()?);
     std::thread::spawn(move || {
         for m in rx {
-            if write_msg(&mut writer, &magic, &m).is_err() {
+            let size = m.approx_size();
+            let ok = write_msg(&mut writer, &magic, &m).is_ok();
+            queued.fetch_sub(size, Ordering::Relaxed);
+            if !ok {
+                // also ends the reader, which removes the peer
+                let _ = writer.get_ref().shutdown(std::net::Shutdown::Both);
                 break;
             }
         }
     });
-    let _ = tx.send(hello);
+    if let Some(p) = shared.lock().unwrap().peers.get(&id) {
+        p.deliver(hello);
+    }
     let reader_stream = stream.try_clone()?;
     std::thread::spawn(move || {
         let mut reader = BufReader::new(reader_stream);
@@ -621,13 +677,14 @@ fn handle_headers(shared: &Shared, peer: u64, bytes: &[u8]) -> Result<(), &'stat
     r.finish().map_err(|_| "malformed headers")?;
     let mut last_height = 0;
     for (h, c) in list {
-        let (epoch, threads) = {
+        let (seed, cached, threads) = {
             let mut st = shared.lock().unwrap();
             match st.headers.check_context(&h, &c, now()) {
                 Ok(None) => continue,
                 Ok(Some(seed)) => {
                     let threads = st.headers.threads();
-                    (st.chain.epoch(&seed), threads)
+                    let cached = st.chain.has_epoch(&seed).then(|| st.chain.epoch(&seed));
+                    (seed, cached, threads)
                 }
                 Err(Error::UnknownParent) => {
                     // the peer's chain forks below what it was asked for: ask again from our headers
@@ -635,10 +692,17 @@ fn handle_headers(shared: &Shared, peer: u64, bytes: &[u8]) -> Result<(), &'stat
                     st.send(peer, Msg::GetHeaders(loc));
                     return Ok(());
                 }
-                Err(Error::Invalid("time too far in the future")) => return Ok(()),
+                // a clock difference or our own reorg policy: not the peer's fault
+                Err(Error::Invalid("time too far in the future")) | Err(Error::Invalid(DEEP_FORK)) => return Ok(()),
                 Err(_) => return Err("invalid header"),
             }
         };
+        // weights not cached yet (a new epoch): derived without holding the node's lock
+        let epoch = cached.unwrap_or_else(|| {
+            let e = Arc::new(tnet::Epoch::from_seed(&seed, net.tnet));
+            shared.lock().unwrap().chain.insert_epoch(seed, e.clone());
+            e
+        });
         verify_claim(&net, &epoch, &h, &c, threads).map_err(|_| "invalid header")?;
         last_height = h.height;
         shared.lock().unwrap().headers.insert_verified(h, c);

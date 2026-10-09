@@ -44,6 +44,19 @@ pub enum Msg {
     Headers(Vec<u8>),
 }
 
+impl Msg {
+    /// Approximate encoded size, for bounding what is queued for a peer.
+    pub fn approx_size(&self) -> usize {
+        16 + match self {
+            Msg::Block(b) | Msg::Tx(b) | Msg::Headers(b) => b.len(),
+            Msg::GetBlocks(v) | Msg::Inv(v) | Msg::GetData(v) | Msg::GetHeaders(v) => 32 * v.len(),
+            Msg::Addr(v) => 19 * v.len(),
+            Msg::Hello { agent, .. } => 64 + agent.len(),
+            Msg::Ping(_) | Msg::Pong(_) | Msg::GetAddr => 8,
+        }
+    }
+}
+
 fn hashes(w: &mut Writer, v: &[Hash]) {
     w.varint(v.len() as u64);
     for h in v {

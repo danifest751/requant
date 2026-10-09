@@ -146,6 +146,27 @@ impl Tx {
 
     /// Checks that need no chain state: shape, amounts, duplicate inputs, signatures.
     pub fn check_standalone(&self, chain_id: &Hash) -> Result<(), Error> {
+        self.check_shape()?;
+        self.check_signatures(chain_id)
+    }
+
+    /// Every input's ed25519 signature (strict verification). The expensive part of the checks; callers that
+    /// face untrusted input run it last.
+    pub fn check_signatures(&self, chain_id: &Hash) -> Result<(), Error> {
+        if let Tx::Transfer { inputs, .. } = self {
+            let txid = self.txid();
+            for (k, inp) in inputs.iter().enumerate() {
+                let key = VerifyingKey::from_bytes(&inp.pubkey).map_err(|_| Error::Invalid("bad public key"))?;
+                let sig = Signature::from_bytes(&inp.sig);
+                key.verify_strict(&Self::sighash(chain_id, &txid, k as u32), &sig)
+                    .map_err(|_| Error::Invalid("bad signature"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks without signatures: amounts, empty transfers, duplicate inputs.
+    pub fn check_shape(&self) -> Result<(), Error> {
         let outputs = self.outputs();
         let mut total: u64 = 0;
         for o in outputs {
@@ -162,13 +183,6 @@ impl Tx {
             seen.sort();
             if seen.windows(2).any(|p| p[0] == p[1]) {
                 return Err(Error::Invalid("duplicate input"));
-            }
-            let txid = self.txid();
-            for (k, inp) in inputs.iter().enumerate() {
-                let key = VerifyingKey::from_bytes(&inp.pubkey).map_err(|_| Error::Invalid("bad public key"))?;
-                let sig = Signature::from_bytes(&inp.sig);
-                key.verify_strict(&Self::sighash(chain_id, &txid, k as u32), &sig)
-                    .map_err(|_| Error::Invalid("bad signature"))?;
             }
         }
         Ok(())

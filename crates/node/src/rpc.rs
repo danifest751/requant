@@ -143,6 +143,7 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "height": st.chain.height(),
                 "headers": st.headers.height(),
                 "tip": hex(&st.chain.tip()),
+                "chainwork": hex(&st.chain.tip_work().to_be_bytes()),
                 "issued_atoms": st.chain.issued(),
                 "peers": peers.len(),
                 "outbound": outbound,

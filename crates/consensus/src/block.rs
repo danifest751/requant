@@ -138,6 +138,13 @@ impl Block {
     /// Checks that need no chain state: version, size, `tx_root`, coinbase placement and height,
     /// transaction shapes and signatures. The claim and everything contextual are checked by the chain.
     pub fn check_standalone(&self, net: &Network) -> Result<(), Error> {
+        self.check_structure(net)?;
+        self.txs.iter().try_for_each(|t| t.check_signatures(&net.chain_id))
+    }
+
+    /// [`Block::check_standalone`] without the signatures (cheap): version, size, piece length, `tx_root`,
+    /// coinbase placement and height, transaction shapes.
+    pub fn check_structure(&self, net: &Network) -> Result<(), Error> {
         if self.header.version != BLOCK_VERSION {
             return Err(Error::Invalid("block version"));
         }
@@ -157,10 +164,7 @@ impl Block {
         if self.txs[1..].iter().any(Tx::is_coinbase) {
             return Err(Error::Invalid("second coinbase"));
         }
-        for t in &self.txs {
-            t.check_standalone(&net.chain_id)?;
-        }
-        Ok(())
+        self.txs.iter().try_for_each(Tx::check_shape)
     }
 }
 

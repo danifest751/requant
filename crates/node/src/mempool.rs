@@ -96,7 +96,8 @@ impl Mempool {
         if self.bytes + size > MAX_POOL_BYTES {
             return Err(Error::Invalid("pool full"));
         }
-        tx.check_standalone(&chain.net.chain_id)?;
+        // cheap checks and input lookups first; the signatures (the expensive part) last
+        tx.check_shape()?;
         let Tx::Transfer { inputs, outputs } = &tx else { return Err(Error::Invalid("coinbase outside a block")) };
         let mut total_in: u64 = 0;
         let mut parents = Vec::new();
@@ -126,6 +127,7 @@ impl Mempool {
         if anc.len() > MAX_ANCESTORS {
             return Err(Error::Invalid("too many unconfirmed ancestors"));
         }
+        tx.check_signatures(&chain.net.chain_id)?;
         for i in inputs {
             self.spends.insert(i.prev, txid);
         }

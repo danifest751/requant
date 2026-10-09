@@ -67,6 +67,10 @@ pub struct Network {
     pub dev_fund: [u8; 32],
     /// Last height that pays the development fund.
     pub dev_fund_last: u64,
+    /// Cumulative work of a known good chain. Until a node's tip has this much work it is still syncing and
+    /// does not apply its reorganisation limit, so a cheap chain served first cannot lock it out of the real
+    /// one. Raised at releases; not a consensus rule.
+    pub min_chain_work: U256,
 }
 
 impl Network {
@@ -94,6 +98,7 @@ impl Network {
             maturity,
             dev_fund: dev_fund.0,
             dev_fund_last: dev_fund.1,
+            min_chain_work: U256::ZERO,
         }
     }
 
