@@ -43,6 +43,8 @@ const JOB_REFRESH: u64 = 30;
 const JOBS_KEPT: usize = 4;
 /// Window for the hashrate estimates.
 const RATE_WINDOW: u64 = 600;
+/// Devices without a share for this long are not listed (their counts stay in the address's totals).
+const DEVICE_LISTED: u64 = 86_400;
 
 #[derive(Clone)]
 pub struct PoolConfig {
@@ -543,18 +545,26 @@ pub fn stats(st: &State) -> Option<Value> {
         .miners
         .iter()
         .map(|(m, s)| {
-            let mut workers: Vec<Value> = pool
-                .workers
+            // an address's counts are the sums over its devices, so the rows always add up (shares sent before
+            // devices were tracked are left out); devices silent for a day are not listed
+            let mine: Vec<(&String, &MinerStats)> =
+                pool.workers.iter().filter(|((wm, _), _)| wm == m).map(|((_, w), ws)| (w, ws)).collect();
+            let (shares, rejected, last) = if mine.is_empty() {
+                (s.shares, s.rejected, s.last)
+            } else {
+                mine.iter().fold((0, 0, 0), |(n, r, l), (_, ws)| (n + ws.shares, r + ws.rejected, l.max(ws.last)))
+            };
+            let mut workers: Vec<Value> = mine
                 .iter()
-                .filter(|((wm, _), _)| wm == m)
-                .map(|((_, w), ws)| {
+                .filter(|(_, ws)| t.saturating_sub(ws.last) <= DEVICE_LISTED)
+                .map(|(w, ws)| {
                     json!({"name": w, "tickets_per_s": rate(recent_w.get(&(*m, w.as_str()))),
                            "shares": ws.shares, "rejected": ws.rejected, "last_share": ws.last})
                 })
                 .collect();
             workers.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-            json!({"address": address(net, m), "tickets_per_s": rate(recent.get(m)), "shares": s.shares,
-                   "rejected": s.rejected, "last_share": s.last, "balance": pool.balances.get(m).copied().unwrap_or(0),
+            json!({"address": address(net, m), "tickets_per_s": rate(recent.get(m)), "shares": shares,
+                   "rejected": rejected, "last_share": last, "balance": pool.balances.get(m).copied().unwrap_or(0),
                    "immature": immature.get(m).copied().unwrap_or(0), "paid": s.paid, "workers": workers})
         })
         .collect();
