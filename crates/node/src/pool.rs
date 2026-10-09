@@ -516,16 +516,23 @@ pub fn stats(st: &State) -> Option<Value> {
     let net = &st.chain.net;
     let t = now();
     let share_work = 2f64.powi(pool.cfg.share_bits as i32);
-    let mut recent: HashMap<Hash, u64> = HashMap::new();
-    let mut recent_w: HashMap<(Hash, &str), u64> = HashMap::new();
+    // shares in the last RATE_WINDOW seconds and the earliest of them, per address and per device: a device that
+    // started recently is rated over the time it has been sending shares (at least a minute), not the window
+    let mut recent: HashMap<Hash, (u64, u64)> = HashMap::new();
+    let mut recent_w: HashMap<(Hash, &str), (u64, u64)> = HashMap::new();
     for (m, at, w) in pool.window.iter().rev() {
         if t.saturating_sub(*at) > RATE_WINDOW {
             break;
         }
-        *recent.entry(*m).or_default() += 1;
-        *recent_w.entry((*m, w.as_str())).or_default() += 1;
+        for e in [recent.entry(*m).or_insert((0, *at)), recent_w.entry((*m, w.as_str())).or_insert((0, *at))] {
+            e.0 += 1;
+            e.1 = *at;
+        }
     }
-    let rate = |n: u64| n as f64 * share_work / RATE_WINDOW as f64;
+    let rate = |e: Option<&(u64, u64)>| match e {
+        Some(&(n, first)) => n as f64 * share_work / t.saturating_sub(first).clamp(60, RATE_WINDOW) as f64,
+        None => 0.0,
+    };
     let mut immature: HashMap<Hash, u64> = HashMap::new();
     for c in &pool.immature {
         for (m, a) in &c.credits {
@@ -541,12 +548,12 @@ pub fn stats(st: &State) -> Option<Value> {
                 .iter()
                 .filter(|((wm, _), _)| wm == m)
                 .map(|((_, w), ws)| {
-                    json!({"name": w, "tickets_per_s": rate(recent_w.get(&(*m, w.as_str())).copied().unwrap_or(0)),
+                    json!({"name": w, "tickets_per_s": rate(recent_w.get(&(*m, w.as_str()))),
                            "shares": ws.shares, "rejected": ws.rejected, "last_share": ws.last})
                 })
                 .collect();
             workers.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-            json!({"address": address(net, m), "tickets_per_s": rate(recent.get(m).copied().unwrap_or(0)), "shares": s.shares,
+            json!({"address": address(net, m), "tickets_per_s": rate(recent.get(m)), "shares": s.shares,
                    "rejected": s.rejected, "last_share": s.last, "balance": pool.balances.get(m).copied().unwrap_or(0),
                    "immature": immature.get(m).copied().unwrap_or(0), "paid": s.paid, "workers": workers})
         })
