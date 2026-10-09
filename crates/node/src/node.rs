@@ -156,6 +156,8 @@ pub struct State {
     listen_port: u16,
     bans: HashMap<IpAddr, u64>,
     bans_path: PathBuf,
+    /// Where epoch weights files live (see `epochs`).
+    epoch_dir: PathBuf,
     allow_local: bool,
     pub started: u64,
     pub pool: Option<crate::pool::Pool>,
@@ -690,14 +692,14 @@ fn handle_headers(shared: &Shared, peer: u64, bytes: &[u8]) -> Result<(), &'stat
     r.finish().map_err(|_| "malformed headers")?;
     let mut last_height = 0;
     for (h, c) in list {
-        let (seed, cached, threads) = {
-            let mut st = shared.lock().unwrap();
+        let (seed, current, threads) = {
+            let st = shared.lock().unwrap();
             match st.headers.check_context(&h, &c, now()) {
                 Ok(None) => continue,
                 Ok(Some(seed)) => {
                     let threads = st.headers.threads();
-                    let cached = st.chain.has_epoch(&seed).then(|| st.chain.epoch(&seed));
-                    (seed, cached, threads)
+                    let current = st.chain.upcoming_epoch_seeds()[0];
+                    (seed, current, threads)
                 }
                 Err(Error::UnknownParent) => {
                     // the peer's chain forks below what it was asked for: ask again from our headers
@@ -710,12 +712,8 @@ fn handle_headers(shared: &Shared, peer: u64, bytes: &[u8]) -> Result<(), &'stat
                 Err(_) => return Err("invalid header"),
             }
         };
-        // weights not cached yet (a new epoch): derived without holding the node's lock
-        let epoch = cached.unwrap_or_else(|| {
-            let e = Arc::new(tnet::Epoch::from_seed(&seed, net.tnet));
-            shared.lock().unwrap().chain.insert_epoch(seed, e.clone());
-            e
-        });
+        // weights of a new epoch are derived without holding the node's lock, keeping the block chain's
+        let epoch = epoch_for(shared, &seed, &[current]);
         verify_claim(&net, &epoch, &h, &c, threads).map_err(|_| "invalid header")?;
         last_height = h.height;
         shared.lock().unwrap().headers.insert_verified(h, c);
@@ -806,9 +804,14 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         allow_local,
         started: now(),
         pool: cfg.pool.clone().map(|p| crate::pool::Pool::new(p, dir.join("pool.json"))),
+        epoch_dir: dir.join("epochs"),
     };
     let shared: Shared = Arc::new(Mutex::new(state));
     let stop = Arc::new(AtomicBool::new(false));
+    // the current epoch's weights before anything can ask for them (otherwise the first request derives
+    // them under the node's lock, and a second copy could be derived at the same time)
+    let current = shared.lock().unwrap().chain.upcoming_epoch_seeds()[0];
+    epoch_for(&shared, &current, &[]);
 
     {
         let shared = shared.clone();
@@ -916,21 +919,57 @@ fn connection_manager(
 
 /// Derive the weights of the current and the next epoch off the lock, as soon as their seeds are known,
 /// so block verification never waits for a derivation (7 s per epoch for TNet v1).
+/// One epoch derivation at a time: two threads deriving the same weights would hold 1 GiB for nothing.
+static DERIVING: Mutex<()> = Mutex::new(());
+
+/// Weights for `seed`: from the cache, or derived without holding the node's lock (one derivation at a
+/// time; weights other than `keep` are dropped first, so memory stays at two epochs).
+pub fn epoch_for(shared: &Shared, seed: &Hash, keep: &[Hash]) -> Arc<tnet::Epoch> {
+    let cached = |shared: &Shared| {
+        let mut st = shared.lock().unwrap();
+        st.chain.has_epoch(seed).then(|| st.chain.epoch(seed))
+    };
+    if let Some(e) = cached(shared) {
+        return e;
+    }
+    let _one = DERIVING.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = cached(shared) {
+        return e; // derived by another thread meanwhile
+    }
+    let (params, dir) = {
+        let mut st = shared.lock().unwrap();
+        let mut k = keep.to_vec();
+        k.push(*seed);
+        st.chain.retain_epochs(&k);
+        (st.chain.net.tnet, st.epoch_dir.clone())
+    };
+    let t = std::time::Instant::now();
+    // large weights go to a file the OS caches (see `epochs`); small ones (regtest) stay in memory
+    let on_disk = params.layers * params.n * params.n >= 64 << 20;
+    let epoch = Arc::new(match on_disk.then(|| crate::epochs::open_or_derive(&dir, seed, params, keep)) {
+        Some(Ok(e)) => e,
+        Some(Err(e)) => {
+            eprintln!("epoch weights file in {}: {e}; keeping them in memory", dir.display());
+            tnet::Epoch::from_seed(seed, params)
+        }
+        None => tnet::Epoch::from_seed(seed, params),
+    });
+    shared.lock().unwrap().chain.insert_epoch(*seed, epoch.clone());
+    if params.n > 1024 {
+        eprintln!("epoch weights prepared in {:.1} s", t.elapsed().as_secs_f64());
+    }
+    epoch
+}
+
 fn epoch_preparer(shared: Shared, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::Relaxed) {
-        let (missing, params) = {
+        let upcoming = {
             let st = shared.lock().unwrap();
-            let seeds: Vec<Hash> =
-                st.chain.upcoming_epoch_seeds().into_iter().filter(|s| !st.chain.has_epoch(s)).collect();
-            (seeds, st.chain.net.tnet)
+            st.chain.upcoming_epoch_seeds()
         };
-        for seed in missing {
-            let t = std::time::Instant::now();
-            let epoch = Arc::new(tnet::Epoch::from_seed(&seed, params));
-            shared.lock().unwrap().chain.insert_epoch(seed, epoch);
-            if params.n > 1024 {
-                eprintln!("epoch weights prepared in {:.1} s", t.elapsed().as_secs_f64());
-            }
+        for seed in &upcoming {
+            // keep only the current epoch while preparing the next
+            epoch_for(&shared, seed, &upcoming[..1]);
         }
         std::thread::sleep(Duration::from_millis(500));
     }

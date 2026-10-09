@@ -210,12 +210,34 @@ fn pick_dot() -> DotFn {
     dot_generic
 }
 
+/// Where an epoch's transposed weights live when they are not held in memory (e.g. a file the operating
+/// system caches: same speed while cached, and the memory stays reclaimable).
+pub trait LayerSource: Send + Sync {
+    /// Fill `out` with rows `j0 .. j0 + out.len() / n` of `WT_l` (row `j` is column `j` of `W_l`). A source
+    /// that cannot read must not return wrong bytes: an error here aborts the check with a panic.
+    fn read(&self, l: usize, j0: usize, out: &mut [i8]) -> std::io::Result<()>;
+}
+
+enum Weights {
+    Memory(Vec<Vec<i8>>),
+    External(Box<dyn LayerSource>),
+}
+
+/// Rows of `WT_l` read at once from a [`LayerSource`] (2 MiB for TNet v1).
+const ROWS_PER_READ: usize = 256;
+
 /// Verifier state for one epoch: the weights stored transposed (`WT[j][k] = W[k][j]`, `L n^2` bytes), so
 /// every output entry is one contiguous int8 dot product. Built once per epoch.
 pub struct Epoch {
     pub p: Params,
-    wt: Vec<Vec<i8>>,
+    wt: Weights,
     dot: DotFn,
+}
+
+/// `WT_l`, the transposed weights of layer `l` (`n^2` bytes) as an [`Epoch`] keeps them, for storing them
+/// elsewhere and reading them back through a [`LayerSource`].
+pub fn transposed_layer(epoch_seed: &[u8; 32], p: Params, l: u32) -> Vec<i8> {
+    transpose(&layer_weights(epoch_seed, p.n, l), p.n)
 }
 
 /// `n x n` transpose in 64 x 64 tiles.
@@ -237,26 +259,46 @@ fn transpose(w: &[i8], n: usize) -> Vec<i8> {
 impl Epoch {
     /// Derive the epoch weights, one layer at a time, keeping only the transposed copy.
     pub fn from_seed(epoch_seed: &[u8; 32], p: Params) -> Self {
-        let wt = (0..p.layers as u32).map(|l| transpose(&layer_weights(epoch_seed, p.n, l), p.n)).collect();
-        Epoch { p, wt, dot: pick_dot() }
+        let wt = (0..p.layers as u32).map(|l| transposed_layer(epoch_seed, p, l)).collect();
+        Epoch { p, wt: Weights::Memory(wt), dot: pick_dot() }
     }
 
     /// From row-major weights (`W_l` as returned by [`layer_weights`]).
     pub fn from_weights(weights: &[Vec<i8>], p: Params) -> Self {
-        Epoch { p, wt: weights.iter().map(|w| transpose(w, p.n)).collect(), dot: pick_dot() }
+        Epoch { p, wt: Weights::Memory(weights.iter().map(|w| transpose(w, p.n)).collect()), dot: pick_dot() }
+    }
+
+    /// With the transposed weights read from `source` at every check instead of held in memory.
+    pub fn from_source(p: Params, source: Box<dyn LayerSource>) -> Self {
+        Epoch { p, wt: Weights::External(source), dot: pick_dot() }
     }
 
     fn layer(&self, x: &[i8], l: usize, threads: usize) -> Vec<i8> {
         let n = self.p.n;
-        let (wt, mult, dot) = (&self.wt[l], self.p.mult, self.dot);
+        let (mult, dot) = (self.p.mult, self.dot);
         let mut out = vec![0i8; n];
         let chunk = n.div_ceil(threads.clamp(1, n));
         std::thread::scope(|s| {
             for (t, dst) in out.chunks_mut(chunk).enumerate() {
-                s.spawn(move || {
-                    for (q, d) in dst.iter_mut().enumerate() {
-                        let j = t * chunk + q;
-                        *d = requant(dot(x, &wt[j * n..(j + 1) * n]), mult);
+                let wt = &self.wt;
+                s.spawn(move || match wt {
+                    Weights::Memory(wt) => {
+                        let wt = &wt[l];
+                        for (q, d) in dst.iter_mut().enumerate() {
+                            let j = t * chunk + q;
+                            *d = requant(dot(x, &wt[j * n..(j + 1) * n]), mult);
+                        }
+                    }
+                    Weights::External(src) => {
+                        let mut buf = vec![0i8; ROWS_PER_READ.min(dst.len()) * n];
+                        for (b, block) in dst.chunks_mut(ROWS_PER_READ).enumerate() {
+                            let j0 = t * chunk + b * ROWS_PER_READ;
+                            let rows = &mut buf[..block.len() * n];
+                            src.read(l, j0, rows).expect("epoch weights could not be read");
+                            for (q, d) in block.iter_mut().enumerate() {
+                                *d = requant(dot(x, &rows[q * n..(q + 1) * n]), mult);
+                            }
+                        }
                     }
                 });
             }
@@ -382,5 +424,29 @@ mod tests {
             }
         }
         panic!("no 6-bit ticket in 64 nonces");
+    }
+
+    /// Transposed layers kept apart, read back like a file would be.
+    struct Rows(Vec<Vec<i8>>, usize);
+
+    impl LayerSource for Rows {
+        fn read(&self, l: usize, j0: usize, out: &mut [i8]) -> std::io::Result<()> {
+            out.copy_from_slice(&self.0[l][j0 * self.1..j0 * self.1 + out.len()]);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn external_weights_give_the_same_rows() {
+        // n larger than ROWS_PER_READ, so every thread reads several blocks
+        let p = Params { n: 640, b: 4, layers: 3, w: 64, mult: default_mult(640) };
+        let seed = [9u8; 32];
+        let mem = Epoch::from_seed(&seed, p);
+        let layers = (0..p.layers as u32).map(|l| transposed_layer(&seed, p, l)).collect();
+        let ext = Epoch::from_source(p, Box::new(Rows(layers, p.n)));
+        let x = x0_seed(&[3u8; 32], 5);
+        for threads in [1, 2, 3, 7] {
+            assert_eq!(ext.forward_row(&x, 2, threads), mem.forward_row(&x, 2, 1), "{threads} threads");
+        }
     }
 }

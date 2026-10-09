@@ -271,6 +271,12 @@ impl Chain {
         v
     }
 
+    /// Drop cached weights other than `keep` (512 MiB each for TNet v1): called before deriving new
+    /// weights elsewhere, so the cache and the derivation never hold more than two epochs together.
+    pub fn retain_epochs(&mut self, keep: &[Hash]) {
+        self.epochs.retain(|(s, _)| keep.contains(s));
+    }
+
     pub fn has_epoch(&self, seed: &Hash) -> bool {
         self.epochs.iter().any(|(s, _)| s == seed)
     }
