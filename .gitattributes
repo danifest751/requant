@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.jsonl text eol=lf
+*.bat text eol=crlf
+deploy/windows/README.txt text eol=crlf

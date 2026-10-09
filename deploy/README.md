@@ -37,3 +37,12 @@ Check a node: `journalctl -u requantd -f`, `curl -s -X POST 127.0.0.1:19334 -d '
 ## Miner
 
 `requant-miner.service` is a template for a GPU miner next to a node.
+
+## Windows miner package
+
+`deploy/windows/` holds the scripts of the Windows test-network package: `config.bat` (payee, seeds,
+GPU), `start-all.bat`, `start-node.bat`, `start-miner.bat`, `balance.bat`, `selftest.bat` and a Russian
+`README.txt`. The package adds `requantd.exe` and `requant-wallet.exe` (`cargo build --release`, only system
+DLLs) and `cppminer.exe` from the CPPminer `feat/tnet-backend` branch built with
+`build.ps1 -Backend Cuda -EnableCublas -CudaArch "75;86;89;120-virtual"`, with `cudart64_12.dll`,
+`cublas64_12.dll` and `cublasLt64_12.dll` from CUDA 12.9.
