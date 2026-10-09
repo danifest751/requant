@@ -34,6 +34,11 @@ platform's binary from the GitHub release, checks the signed SHA-256 and the ver
 replaces its executable and exits for its service (systemd, or the loop in `start-node.bat`) to start the
 new one. It never installs a version older than its own. Without the flag nothing is downloaded.
 
+## Test coins
+
+The faucet at http://193.187.93.29:19380/faucet sends 10 RQT to a test-network address, once a day per
+address. A node runs one with `--faucet-key FILE` (an unencrypted key; `--faucet-amount`, `--faucet-daily`).
+
 ## Wallet
 
 The wallet talks to a node's RPC (`--rpc HOST:PORT`, default `127.0.0.1:19334`); the test network is the

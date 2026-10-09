@@ -97,6 +97,8 @@ pub struct Config {
     pub auto_update: bool,
     /// Key releases must be signed with (`release::RELEASE_KEY`; tests use their own).
     pub release_key: [u8; 32],
+    /// Run the test-network faucet from this key (see `faucet`).
+    pub faucet: Option<crate::faucet::FaucetConfig>,
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -170,6 +172,7 @@ pub struct State {
     release_path: PathBuf,
     pub auto_update: bool,
     pub release_key: [u8; 32],
+    pub faucet: Option<crate::faucet::Faucet>,
     allow_local: bool,
     pub started: u64,
     pub pool: Option<crate::pool::Pool>,
@@ -862,6 +865,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         release_path: dir.join("release.bin"),
         auto_update: cfg.auto_update,
         release_key: cfg.release_key,
+        faucet: cfg.faucet.clone().map(crate::faucet::Faucet::new),
     };
     let shared: Shared = Arc::new(Mutex::new(state));
     let stop = Arc::new(AtomicBool::new(false));

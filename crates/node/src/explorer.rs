@@ -1,6 +1,7 @@
-//! Read-only block explorer served by the node (`--explorer ADDR`): network summary, latest blocks, block,
-//! transaction and address pages, search. Plain HTML, no scripts; every value shown comes from the node's
-//! own state and is parsed before use, so nothing user-supplied is echoed.
+//! Block explorer served by the node (`--explorer ADDR`): network summary, latest blocks, block,
+//! transaction and address pages, search, the network and pool pages, `/health`, and the faucet form (its
+//! one write: POST /faucet). Plain HTML, no scripts; values come from the node's own state and are parsed
+//! before use, and text from outside (peer software names, faucet errors) is escaped.
 
 use crate::node::{now, Shared};
 use requant_consensus::address::{address, format_amount, parse_address};
@@ -42,14 +43,19 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
     reader.by_ref().take(2048).read_line(&mut line)?;
+    let method = line.split_whitespace().next().unwrap_or("GET").to_string();
     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
-    // read the headers, keeping the host name (shown in the pool's connect command)
+    // read the headers, keeping the host name (shown in the pool's connect command) and the body length
     let mut h = String::new();
     let mut host = String::from("this-host");
+    let mut body_len = 0usize;
     for _ in 0..64 {
         h.clear();
         if reader.by_ref().take(4096).read_line(&mut h)? == 0 || h.trim().is_empty() {
             break;
+        }
+        if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+            body_len = v.trim().parse().unwrap_or(0);
         }
         if let Some(v) = h.to_ascii_lowercase().strip_prefix("host:") {
             let name = v.trim().rsplit_once(':').map(|(n, _)| n.to_string()).unwrap_or_else(|| v.trim().to_string());
@@ -69,7 +75,28 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
             body.len()
         );
     }
-    let (status, body) = route(shared, &path, &host);
+    let (status, body) = if method == "POST" && path == "/faucet" {
+        // the form's one field: to=<address> (an address has only letters and digits)
+        let mut form = vec![0u8; body_len.min(512)];
+        reader.read_exact(&mut form)?;
+        let to: String = String::from_utf8_lossy(&form)
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("to="))
+            .unwrap_or("")
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(100)
+            .collect();
+        let ip = stream.peer_addr().map(|a| a.ip()).unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+        let mut st = shared.lock().unwrap();
+        let outcome = match parse_address(&st.chain.net, &to) {
+            Err(_) => Err("that is not a test-network address (trq1...)".to_string()),
+            Ok(owner) => crate::faucet::request(&mut st, ip, owner),
+        };
+        ("200 OK", faucet_page(&st, Some(outcome)))
+    } else {
+        route(shared, &path, &host)
+    };
     if let Some(loc) = body.strip_prefix("REDIRECT ") {
         return write!(
             stream,
@@ -238,12 +265,13 @@ fn page(title: &str, body: &str, refresh: bool) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{meta}\
 <title>{title} · Requant</title><style>{STYLE}</style></head><body>\
 <div class=\"top\"><div class=\"in\"><a class=\"brand\" href=\"/\"><span class=\"logo\">R</span>Requant</a><span class=\"tag\">testnet</span>\
-<nav><a href=\"/\"{}>Explorer</a><a href=\"/network\"{}>Network</a><a href=\"/pool\"{}>Pool</a></nav>\
+<nav><a href=\"/\"{}>Explorer</a><a href=\"/network\"{}>Network</a><a href=\"/pool\"{}>Pool</a><a href=\"/faucet\"{}>Faucet</a></nav>\
 <form action=\"/search\"><input name=\"q\" placeholder=\"Search block height, block id, txid or address\" aria-label=\"Search\"></form></div></div>\
 <main>{body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/danifest751/requant\">source</a></footer></main></body></html>",
         on("Requant test network"),
         on("Network"),
-        on("Mining pool")
+        on("Mining pool"),
+        on("Faucet")
     )
 }
 
@@ -278,6 +306,7 @@ fn route(shared: &Shared, path: &str, host: &str) -> (&'static str, String) {
             Err(_) => not_found("Address"),
         },
         ["", "network"] => ("200 OK", network_page(&st)),
+        ["", "faucet"] => ("200 OK", faucet_page(&st, None)),
         ["", "pool"] => match crate::pool::stats(&st) {
             Some(s) => ("200 OK", pool_page(&s, host)),
             None => not_found("Pool (this node runs none)"),
@@ -362,6 +391,63 @@ fn home(st: &crate::node::State) -> String {
     }
     body += "</table></div>";
     page("Requant test network", &body, true)
+}
+
+/// The faucet: a form for an address, and the outcome of a request.
+fn faucet_page(st: &crate::node::State, outcome: Option<Result<Hash, String>>) -> String {
+    let Some(f) = &st.faucet else {
+        return page("Faucet", "<h1>Faucet</h1><p class=\"sub\">This node runs no faucet.</p>", false);
+    };
+    let net = &st.chain.net;
+    let balance: u64 = crate::faucet::coins(st, &f.owner).iter().map(|c| c.1).sum();
+    let mut body = format!(
+        "<h1>Faucet</h1><p class=\"sub\">Test coins for trying the network: {} RQT per request, once a day per          address. Test coins have no value.</p>",
+        format_amount(f.cfg.amount)
+    );
+    match outcome {
+        Some(Ok(txid)) => {
+            let t = hex(&txid);
+            body += &format!(
+                "<div class=\"card\"><span class=\"badge b-ok\">sent</span> {} RQT, transaction                  <a class=\"mono\" href=\"/tx/{t}\">{}</a>; spendable once it is in a block (about a minute).</div>",
+                format_amount(f.cfg.amount),
+                short(&t)
+            )
+        }
+        Some(Err(e)) => {
+            body += &format!("<div class=\"card\"><span class=\"badge b-bad\">not sent</span> {}</div>", esc(&e))
+        }
+        None => {}
+    }
+    body += "<form method=\"post\" action=\"/faucet\" style=\"display:flex;gap:8px;margin:16px 0;max-width:720px\">             <input name=\"to\" placeholder=\"Your test-network address (trq1...)\" aria-label=\"Address\" required>             <button style=\"padding:9px 16px;border-radius:10px;border:0;background:var(--acc);color:#fff;font-weight:600\">Send me coins</button></form>";
+    let cards = [
+        (format!("{} RQT", format_amount(balance)), "faucet balance".to_string()),
+        (
+            format!("{} / {} RQT", format_amount(f.given_today), format_amount(f.cfg.daily)),
+            "given today / daily budget".to_string(),
+        ),
+    ];
+    body += "<div class=\"cards\">";
+    for (v, l) in cards {
+        body += &format!("<div class=\"card\"><div class=\"k\">{l}</div><div class=\"v\">{v}</div></div>");
+    }
+    let fa = address(net, &f.owner);
+    body += &format!(
+        "</div><p class=\"mut\">Faucet address <a class=\"mono\" href=\"/address/{fa}\">{fa}</a>: send unused test coins back          here. No address yet? <code>requant-wallet keygen my.key</code> prints one.</p><h2>Recent</h2><div class=\"tbl\"><table>         <thead><tr><th>Time (UTC)</th><th>To</th><th>Transaction</th></tr></thead><tbody>"
+    );
+    if f.recent.is_empty() {
+        body += "<tr><td colspan=\"3\" class=\"empty\">No requests yet.</td></tr>";
+    }
+    for (t, to, txid) in f.recent.iter().rev() {
+        let (a, x) = (address(net, to), hex(txid));
+        body += &format!(
+            "<tr><td>{}</td><td class=\"mono\"><a href=\"/address/{a}\">{}</a></td><td class=\"mono\"><a href=\"/tx/{x}\">{}</a></td></tr>",
+            utc(*t),
+            short(&a),
+            short(&x)
+        );
+    }
+    body += "</tbody></table></div>";
+    page("Faucet", &body, false)
 }
 
 /// This node's view of the network: its peers (software and height, not their addresses) and the

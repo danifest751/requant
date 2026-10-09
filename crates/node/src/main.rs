@@ -21,6 +21,8 @@ fn main() {
     let mut explorer = None;
     let (mut pool_addr, mut pool_key, mut pool_fee, mut share_bits) = (None, None::<[u8; 32]>, 1.0f64, 24u32);
     let (mut min_payout, mut payout_every) = (100_000_000u64, 600u64);
+    let (mut faucet_key, mut faucet_amount, mut faucet_daily) =
+        (None::<[u8; 32]>, 1_000_000_000u64, 100_000_000_000u64);
     let mut k = 0;
     let value = |k: usize| args.get(k + 1).cloned().unwrap_or_else(|| usage(&format!("{} needs a value", args[k])));
     while k < args.len() {
@@ -61,6 +63,24 @@ fn main() {
             }
             "--pool-payout-every" => {
                 payout_every = value(k).parse().unwrap_or_else(|_| usage("bad --pool-payout-every"))
+            }
+            "--faucet-key" => {
+                let f = value(k);
+                let t = std::fs::read_to_string(&f).unwrap_or_else(|e| usage(&format!("{f}: {e}")));
+                faucet_key = Some(
+                    unhex(t.trim())
+                        .ok()
+                        .and_then(|v| v.try_into().ok())
+                        .unwrap_or_else(|| usage("--faucet-key: unencrypted 64-hex key file")),
+                );
+            }
+            "--faucet-amount" => {
+                faucet_amount =
+                    requant_consensus::address::parse_amount(&value(k)).unwrap_or_else(|_| usage("bad --faucet-amount"))
+            }
+            "--faucet-daily" => {
+                faucet_daily =
+                    requant_consensus::address::parse_amount(&value(k)).unwrap_or_else(|_| usage("bad --faucet-daily"))
             }
             "--explorer" => explorer = Some(value(k).parse().unwrap_or_else(|_| usage("bad --explorer address"))),
             "--mine" => {
@@ -125,6 +145,11 @@ fn main() {
         }),
         auto_update,
         release_key: requant_node::release::RELEASE_KEY,
+        faucet: faucet_key.map(|key| requant_node::faucet::FaucetConfig {
+            key,
+            amount: faucet_amount,
+            daily: faucet_daily,
+        }),
     };
     let net_name = cfg.net.name;
     match start(cfg) {
@@ -155,7 +180,8 @@ fn usage(msg: &str) -> ! {
     eprintln!(
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
          \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
-\n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--auto-update] [--version]"
+\n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--auto-update] [--version]
+                         [--faucet-key FILE [--faucet-amount RQT] [--faucet-daily RQT]]"
     );
     std::process::exit(2)
 }

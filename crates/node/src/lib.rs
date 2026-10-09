@@ -4,6 +4,7 @@
 pub mod addrbook;
 pub mod epochs;
 pub mod explorer;
+pub mod faucet;
 pub mod index;
 pub mod mempool;
 pub mod msg;

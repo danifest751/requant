@@ -44,6 +44,7 @@ fn node_with(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>, release_ke
         pool: None,
         auto_update: false,
         release_key,
+        faucet: None,
     })
     .unwrap()
 }
@@ -307,6 +308,7 @@ fn headers_first_sync_from_two_peers() {
         pool: None,
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
+        faucet: None,
     })
     .unwrap();
     wait("a to mine 150 blocks", 120, || height(&a) >= 150);
