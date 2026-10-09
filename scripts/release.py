@@ -51,8 +51,9 @@ def main() -> int:
     )
     manifest = a.out / f"release-{v}.txt"
     manifest.write_bytes(text.encode())
+    wallet = a.wallet + (".exe" if sys.platform == "win32" and not a.wallet.endswith(".exe") else "")
     sig = subprocess.run(
-        [a.wallet, "sign-release", str(a.key), str(manifest)], capture_output=True, text=True, check=True
+        [str(Path(wallet).resolve()), "sign-release", str(a.key), str(manifest)], capture_output=True, text=True, check=True
     ).stdout.strip()
     sig_file = a.out / f"release-{v}.sig"
     sig_file.write_text(sig + "\n")
