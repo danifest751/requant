@@ -43,15 +43,24 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
     let mut line = String::new();
     reader.by_ref().take(2048).read_line(&mut line)?;
     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
-    // drain the headers
+    // read the headers, keeping the host name (shown in the pool's connect command)
     let mut h = String::new();
+    let mut host = String::from("this-host");
     for _ in 0..64 {
         h.clear();
         if reader.by_ref().take(4096).read_line(&mut h)? == 0 || h.trim().is_empty() {
             break;
         }
+        if let Some(v) = h.to_ascii_lowercase().strip_prefix("host:") {
+            let name = v.trim().rsplit_once(':').map(|(n, _)| n.to_string()).unwrap_or_else(|| v.trim().to_string());
+            let clean: String =
+                name.chars().filter(|c| c.is_ascii_alphanumeric() || ".-".contains(*c)).take(253).collect();
+            if !clean.is_empty() {
+                host = clean;
+            }
+        }
     }
-    let (status, body) = route(shared, &path);
+    let (status, body) = route(shared, &path, &host);
     let mut stream = stream;
     if let Some(loc) = body.strip_prefix("REDIRECT ") {
         return write!(
@@ -120,27 +129,65 @@ fn ago(t: u64) -> String {
     }
 }
 
+const STYLE: &str = r#"
+:root{--bg:#f6f7f9;--fg:#0f172a;--mut:#64748b;--line:#e2e8f0;--card:#ffffff;--acc:#0d9488;--acc2:#6366f1;
+--ok:#16a34a;--okbg:#dcfce7;--warn:#b45309;--warnbg:#fef3c7;--bad:#dc2626;--badbg:#fee2e2;--head:#ffffff;--shadow:0 1px 2px rgba(15,23,42,.06),0 4px 16px rgba(15,23,42,.04)}
+@media (prefers-color-scheme:dark){:root{--bg:#0b1020;--fg:#e2e8f0;--mut:#94a3b8;--line:#1e293b;--card:#111827;--acc:#2dd4bf;--acc2:#818cf8;
+--ok:#4ade80;--okbg:rgba(74,222,128,.12);--warn:#fbbf24;--warnbg:rgba(251,191,36,.12);--bad:#f87171;--badbg:rgba(248,113,113,.12);--head:#0f172a;--shadow:0 1px 2px rgba(0,0,0,.4)}}
+*{box-sizing:border-box}body{background:var(--bg);color:var(--fg);font:15px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;margin:0}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+.top{background:var(--head);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5}
+.top .in{max-width:1180px;margin:0 auto;padding:10px 16px;display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;color:var(--fg);font-weight:700;font-size:18px}.brand:hover{text-decoration:none}
+.logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--acc),var(--acc2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:16px}
+.tag{font-size:11px;font-weight:600;color:var(--acc);border:1px solid var(--acc);border-radius:999px;padding:1px 8px;letter-spacing:.04em;text-transform:uppercase}
+nav{display:flex;gap:4px}nav a{color:var(--mut);padding:6px 10px;border-radius:8px;font-weight:500}nav a:hover,nav a.on{color:var(--fg);background:var(--bg);text-decoration:none}
+form{flex:1;display:flex;min-width:220px}input{flex:1;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);font-size:14px}
+main{max-width:1180px;margin:0 auto;padding:20px 16px}
+h1{font-size:24px;margin:4px 0 2px}h2{font-size:16px;margin:28px 0 10px;color:var(--fg)}
+.sub{color:var(--mut);margin:0 0 16px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:14px 0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;box-shadow:var(--shadow)}
+.card .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.05em}.card .v{font-size:22px;font-weight:700;margin-top:2px}
+.card .h{color:var(--mut);font-size:12px}
+.hero{border-radius:16px;padding:22px;color:#fff;background:linear-gradient(135deg,#0f766e,#4f46e5);box-shadow:var(--shadow);display:grid;gap:14px;grid-template-columns:1.2fr 1fr}
+.hero .big{font-size:40px;font-weight:800;line-height:1.1}.hero .lbl{opacity:.85;font-size:13px;text-transform:uppercase;letter-spacing:.06em}
+.hero .row{display:flex;gap:26px;flex-wrap:wrap;margin-top:10px}.hero .row b{display:block;font-size:20px}.hero .row span{opacity:.8;font-size:12px}
+.connect{background:rgba(255,255,255,.12);border-radius:12px;padding:14px}.connect p{margin:0 0 8px;font-size:13px;opacity:.9}
+code.cmd{display:block;user-select:all;cursor:copy;background:rgba(0,0,0,.28);color:#fff;border-radius:8px;padding:10px 12px;font:13px ui-monospace,Consolas,monospace;word-break:break-all}
+@media (max-width:760px){.hero{grid-template-columns:1fr}}
+.tbl{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto;box-shadow:var(--shadow)}
+table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
+tr:last-child td{border-bottom:none}tbody tr:hover{background:var(--bg)}th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+td.r,th.r{text-align:right}.mono{font-family:ui-monospace,Consolas,monospace;font-size:13px}.mut{color:var(--mut)}
+.plus{color:var(--ok)}.minus{color:var(--bad)}
+.badge{display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600}
+.b-ok{color:var(--ok);background:var(--okbg)}.b-warn{color:var(--warn);background:var(--warnbg)}.b-bad{color:var(--bad);background:var(--badbg)}
+.bar{height:6px;border-radius:999px;background:var(--line);overflow:hidden;min-width:80px}.bar span{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2))}
+details summary{cursor:pointer;list-style:none}details summary::-webkit-details-marker{display:none}details summary .chev{display:inline-block;transition:transform .15s;color:var(--mut);margin-right:6px}
+details[open] summary .chev{transform:rotate(90deg)}
+.wk{margin:8px 0 2px 22px;font-size:13px}.wk td{padding:6px 10px;border:none}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}.on-dot{background:var(--ok)}.off-dot{background:var(--line)}
+dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 18px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;box-shadow:var(--shadow)}
+dt{color:var(--mut)}dd{margin:0;word-break:break-all}
+footer{color:var(--mut);font-size:13px;margin:32px 0 8px;text-align:center}
+.empty{color:var(--mut);padding:18px;text-align:center}
+.wrap{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto;box-shadow:var(--shadow)}
+.card b{display:block;font-size:20px;font-weight:700}.card span{color:var(--mut);font-size:12px}
+"#;
+
 fn page(title: &str, body: &str, refresh: bool) -> String {
     let meta = if refresh { "<meta http-equiv=\"refresh\" content=\"30\">" } else { "" };
+    let on = |t: &str| if title == t { " class=\"on\"" } else { "" };
     format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{meta}\
-<title>{title} · Requant explorer</title><style>\
-:root{{--bg:#fafaf9;--fg:#1c1917;--mut:#78716c;--line:#e7e5e4;--acc:#0f766e;--card:#fff}}\
-@media (prefers-color-scheme:dark){{:root{{--bg:#0c0a09;--fg:#e7e5e4;--mut:#a8a29e;--line:#292524;--acc:#2dd4bf;--card:#1c1917}}}}\
-body{{background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif;margin:0}}\
-main{{max-width:1100px;margin:0 auto;padding:16px}}header{{display:flex;gap:16px;align-items:center;flex-wrap:wrap;margin-bottom:16px}}\
-header a{{font-weight:700;font-size:20px;color:var(--fg);text-decoration:none}}form{{flex:1;display:flex;min-width:240px}}\
-input{{flex:1;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--fg)}}\
-a{{color:var(--acc);text-decoration:none}}a:hover{{text-decoration:underline}}\
-.cards{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:12px 0}}\
-.card{{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:10px 12px}}.card b{{display:block;font-size:18px}}\
-.card span{{color:var(--mut);font-size:13px}}table{{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);border-radius:8px;overflow:hidden}}\
-th,td{{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}}th{{color:var(--mut);font-weight:500;font-size:13px}}\
-td.r,th.r{{text-align:right}}.mono{{font-family:ui-monospace,monospace;font-size:13px}}.wrap{{overflow-x:auto}}.mut{{color:var(--mut)}}\
-.plus{{color:#16a34a}}.minus{{color:#dc2626}}h2{{font-size:17px;margin:20px 0 8px}}dl{{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px}}\
-dt{{color:var(--mut)}}dd{{margin:0;word-break:break-all}}footer{{color:var(--mut);font-size:13px;margin:24px 0}}\
-</style></head><body><main><header><a href=\"/\">Requant explorer</a><a href=\"/pool\" style=\"font-size:15px;font-weight:500\">Pool</a><form action=\"/search\"><input name=\"q\" placeholder=\"Block height, block id, txid or address\" aria-label=\"Search\"></form></header>\
-{body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/danifest751/requant\">source</a></footer></main></body></html>"
+<title>{title} · Requant</title><style>{STYLE}</style></head><body>\
+<div class=\"top\"><div class=\"in\"><a class=\"brand\" href=\"/\"><span class=\"logo\">R</span>Requant</a><span class=\"tag\">testnet</span>\
+<nav><a href=\"/\"{}>Explorer</a><a href=\"/pool\"{}>Pool</a></nav>\
+<form action=\"/search\"><input name=\"q\" placeholder=\"Search block height, block id, txid or address\" aria-label=\"Search\"></form></div></div>\
+<main>{body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/danifest751/requant\">source</a></footer></main></body></html>",
+        on("Requant test network"),
+        on("Mining pool")
     )
 }
 
@@ -148,7 +195,7 @@ fn not_found(what: &str) -> (&'static str, String) {
     ("404 Not Found", page("Not found", &format!("<h2>{what} not found</h2>"), false))
 }
 
-fn route(shared: &Shared, path: &str) -> (&'static str, String) {
+fn route(shared: &Shared, path: &str, host: &str) -> (&'static str, String) {
     let path = path.split('#').next().unwrap_or("/");
     let (p, query) = path.split_once('?').unwrap_or((path, ""));
     let st = shared.lock().unwrap();
@@ -175,7 +222,7 @@ fn route(shared: &Shared, path: &str) -> (&'static str, String) {
             Err(_) => not_found("Address"),
         },
         ["", "pool"] => match crate::pool::stats(&st) {
-            Some(s) => ("200 OK", pool_page(&s)),
+            Some(s) => ("200 OK", pool_page(&s, host)),
             None => not_found("Pool (this node runs none)"),
         },
         ["", "search"] => {
@@ -406,45 +453,104 @@ fn address_page(st: &crate::node::State, owner: &Hash) -> String {
     page("Address", &body, false)
 }
 
-fn pool_page(s: &serde_json::Value) -> String {
+fn badge(status: &str) -> String {
+    let (cls, text) = match status {
+        "credited" => ("b-ok", "credited"),
+        "orphaned" => ("b-bad", "orphaned"),
+        _ => ("b-warn", "maturing"),
+    };
+    format!("<span class=\"badge {cls}\">{text}</span>")
+}
+
+fn pool_page(s: &serde_json::Value, host: &str) -> String {
     let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+    let f = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0);
+    let min_payout = n(&s["min_payout_atoms"]).max(1);
+    let endpoint = format!("{host}:{}", n(&s["port"]));
+    let miners = s["miners"].as_array().cloned().unwrap_or_default();
+    let devices: usize = miners.iter().map(|m| m["workers"].as_array().map(|w| w.len()).unwrap_or(0)).sum();
+    let blocks = s["blocks"].as_array().cloned().unwrap_or_default();
     let mut body = format!(
-        "<h2>Mining pool</h2><div class=\"cards\"><div class=\"card\"><b>{}tickets/s</b><span>pool rate (10 min)</span></div><div class=\"card\"><b>{}</b><span>miners</span></div><div class=\"card\"><b>{} %</b><span>fee</span></div><div class=\"card\"><b>2^{}</b><span>tickets per share</span></div><div class=\"card\"><b>{} RQT</b><span>minimum payout</span></div></div><p class=\"mut\">Connect CPPminer to this pool: <span class=\"mono\">cppminer --algo tnet --rpc HOST:19340 --payee &lt;your key hash&gt;</span>. Rewards are split over the last shares (PPLNS), credited after {} confirmations and paid automatically.</p>",
-        si(s["tickets_per_s"].as_f64().unwrap_or(0.0)),
-        s["miners"].as_array().map(|m| m.len()).unwrap_or(0),
+        "<div class=\"hero\"><div><div class=\"lbl\">Pool rate · last 10 min</div><div class=\"big\">{}tickets/s</div>\
+<div class=\"row\"><div><b>{}</b><span>addresses</span></div><div><b>{}</b><span>devices</span></div>\
+<div><b>{}</b><span>blocks found</span></div><div><b>{} %</b><span>fee</span></div><div><b>{} RQT</b><span>min payout</span></div></div></div>\
+<div class=\"connect\"><p>Connect a GPU (CPPminer, <span style=\"opacity:.8\">--worker names a device</span>):</p>\
+<code class=\"cmd\">cppminer --algo tnet --rpc {endpoint} --payee YOUR_KEY_HASH --worker rig1</code>\
+<p style=\"margin-top:10px\">PPLNS over the last shares · 2^{} tickets per share · paid automatically after {} confirmations, every 10 min</p></div></div>",
+        si(f(&s["tickets_per_s"])),
+        miners.len(),
+        devices,
+        blocks.len(),
         s["fee_percent"],
-        s["share_bits"],
         s["min_payout"].as_str().unwrap_or(""),
-        100
+        s["share_bits"],
+        n(&s["maturity"]),
     );
-    body += "<h2>Miners</h2><div class=\"wrap\"><table><tr><th>Address</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th><th class=\"r\">Immature (RQT)</th><th class=\"r\">Balance (RQT)</th><th class=\"r\">Paid (RQT)</th></tr>";
-    for m in s["miners"].as_array().into_iter().flatten() {
+    body += "<h2>Miners</h2><div class=\"tbl\"><table><thead><tr><th>Address · devices</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th>\
+<th class=\"r\">Maturing</th><th class=\"r\">Balance</th><th>To payout</th><th class=\"r\">Paid</th></tr></thead><tbody>";
+    if miners.is_empty() {
+        body += "<tr><td colspan=\"7\" class=\"empty\">No miners yet — connect one with the command above.</td></tr>";
+    }
+    for m in &miners {
         let a = m["address"].as_str().unwrap_or("");
+        let bal = n(&m["balance"]);
+        let pct = (bal as f64 / min_payout as f64 * 100.0).min(100.0);
+        let mut workers = String::new();
+        for w in m["workers"].as_array().into_iter().flatten() {
+            let active = now().saturating_sub(n(&w["last_share"])) < 600;
+            workers += &format!(
+                "<tr><td><span class=\"dot {}\"></span>{}</td><td class=\"r\">{}tickets/s</td><td class=\"r\">{} shares</td><td class=\"r mut\">{}</td><td class=\"mut\">{}</td></tr>",
+                if active { "on-dot" } else { "off-dot" },
+                w["name"].as_str().unwrap_or(""),
+                si(f(&w["tickets_per_s"])),
+                n(&w["shares"]),
+                if n(&w["rejected"]) > 0 { format!("{} rejected", n(&w["rejected"])) } else { String::new() },
+                if n(&w["last_share"]) > 0 { format!("last share {} ago", ago(n(&w["last_share"]))) } else { String::new() },
+            );
+        }
         body += &format!(
-            "<tr><td class=\"mono\"><a href=\"/address/{a}\">{}</a></td><td class=\"r\">{}tickets/s</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
-            short(a), si(m["tickets_per_s"].as_f64().unwrap_or(0.0)), n(&m["shares"]),
-            format_amount(n(&m["immature"])), format_amount(n(&m["balance"])), format_amount(n(&m["paid"]))
+            "<tr><td><details><summary><span class=\"chev\">▸</span><a class=\"mono\" href=\"/address/{a}\">{}</a> <span class=\"mut\">· {} device(s)</span></summary>\
+<table class=\"wk\">{workers}</table></details></td><td class=\"r\">{}tickets/s</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td>\
+<td><div class=\"bar\" title=\"{pct:.0}% of the minimum payout\"><span style=\"width:{pct:.0}%\"></span></div></td><td class=\"r\">{}</td></tr>",
+            short(a),
+            m["workers"].as_array().map(|w| w.len()).unwrap_or(0),
+            si(f(&m["tickets_per_s"])),
+            n(&m["shares"]),
+            format_amount(n(&m["immature"])),
+            format_amount(bal),
+            format_amount(n(&m["paid"])),
         );
     }
-    body += "</table></div><h2>Blocks found</h2><div class=\"wrap\"><table><tr><th>Height</th><th>Time (UTC)</th><th>Status</th><th class=\"r\">Reward (RQT)</th></tr>";
-    for b in s["blocks"].as_array().into_iter().flatten() {
+    body += "</tbody></table></div><h2>Blocks found by the pool</h2><div class=\"tbl\"><table><thead><tr><th>Height</th><th>Found</th><th>Status</th><th class=\"r\">Reward (RQT)</th></tr></thead><tbody>";
+    if blocks.is_empty() {
+        body += "<tr><td colspan=\"4\" class=\"empty\">No blocks yet.</td></tr>";
+    }
+    for b in &blocks {
         body += &format!(
-            "<tr><td><a href=\"/block/{0}\">{0}</a></td><td>{1}</td><td>{2}</td><td class=\"r\">{3}</td></tr>",
+            "<tr><td><a href=\"/block/{0}\">{0}</a></td><td>{1} <span class=\"mut\">· {2} ago</span></td><td>{3}</td><td class=\"r\">{4}</td></tr>",
             n(&b["height"]),
             utc(n(&b["time"])),
-            b["status"].as_str().unwrap_or(""),
+            ago(n(&b["time"])),
+            badge(b["status"].as_str().unwrap_or("")),
             format_amount(n(&b["reward"]))
         );
     }
-    body += "</table></div><h2>Payouts</h2><div class=\"wrap\"><table><tr><th>Transaction</th><th>Time (UTC)</th><th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr>";
-    for p in s["payouts"].as_array().into_iter().flatten() {
+    body += "</tbody></table></div><h2>Payouts</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th>Time (UTC)</th><th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr></thead><tbody>";
+    let payouts = s["payouts"].as_array().cloned().unwrap_or_default();
+    if payouts.is_empty() {
+        body += "<tr><td colspan=\"4\" class=\"empty\">No payouts yet: balances are paid once they reach the minimum and the blocks have matured.</td></tr>";
+    }
+    for p in &payouts {
         let t = p["txid"].as_str().unwrap_or("");
         body += &format!(
             "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
-            short(t), utc(n(&p["time"])), n(&p["outputs"]), format_amount(n(&p["total"]))
+            short(t),
+            utc(n(&p["time"])),
+            n(&p["outputs"]),
+            format_amount(n(&p["total"]))
         );
     }
-    body += "</table></div>";
+    body += "</tbody></table></div>";
     page("Mining pool", &body, true)
 }
 

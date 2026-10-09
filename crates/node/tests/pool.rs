@@ -43,9 +43,19 @@ fn find_share(work: &Value, start_nonce: u64) -> (u64, u32, u32, String) {
 }
 
 fn submit(pool: SocketAddr, miner: &Hash, nonce_base: u64) -> Value {
+    submit_as(pool, miner, None, nonce_base)
+}
+
+/// A share from a named device (worker) of `miner`.
+fn submit_as(pool: SocketAddr, miner: &Hash, worker: Option<&str>, nonce_base: u64) -> Value {
     let work = request(pool, "getwork", json!([hex(miner)])).unwrap();
     let (nonce, i, c, piece) = find_share(&work, nonce_base);
-    request(pool, "submitwork", json!([work["header_digest"], nonce, i, c, piece, hex(miner)])).unwrap()
+    let mut params =
+        vec![work["header_digest"].clone(), json!(nonce), json!(i), json!(c), json!(piece), json!(hex(miner))];
+    if let Some(w) = worker {
+        params.push(json!(w));
+    }
+    request(pool, "submitwork", Value::Array(params)).unwrap()
 }
 
 #[test]
@@ -86,7 +96,9 @@ fn pool_shares_blocks_and_payouts() {
     let mut blocks = 0;
     for k in 0..12u64 {
         let who = if k % 3 == 2 { &bob } else { &alice };
-        let r = submit(pool_addr, who, k * 1000);
+        // alice mines from two devices under one address
+        let worker = if who == &alice { Some(if k % 2 == 0 { "rig-a" } else { "rtx5070" }) } else { None };
+        let r = submit_as(pool_addr, who, worker, k * 1000);
         assert_eq!(r["accepted"], true, "{r}");
         if r["block"] == true {
             blocks += 1;
@@ -133,6 +145,13 @@ fn pool_shares_blocks_and_payouts() {
     assert!(!stats["payouts"].as_array().unwrap().is_empty());
     let (a, b) = (paid(&alice), paid(&bob));
     assert!(a > b, "alice {a} bob {b}");
+    // per-device statistics under alice's one address (payouts go to the address)
+    let alice_addr = requant_consensus::address::address(&Network::regtest(), &alice);
+    let row = stats["miners"].as_array().unwrap().iter().find(|m| m["address"] == alice_addr.as_str()).unwrap().clone();
+    let names: Vec<&str> = row["workers"].as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"rig-a") && names.contains(&"rtx5070"), "{names:?}");
+    let sum: u64 = row["workers"].as_array().unwrap().iter().map(|w| w["shares"].as_u64().unwrap()).sum();
+    assert_eq!(sum, row["shares"].as_u64().unwrap());
 }
 
 fn wait_pool_addr(n: &requant_node::node::Handle) -> SocketAddr {

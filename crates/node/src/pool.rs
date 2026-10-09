@@ -18,6 +18,24 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+const DEFAULT_WORKER: &str = "default";
+
+/// A device name from the 7th `submitwork` parameter: letters, digits, `.`, `_`, `-`, at most 32.
+fn worker_name(v: Option<&Value>) -> String {
+    let w: String = v
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || "._-".contains(*c))
+        .take(32)
+        .collect();
+    if w.is_empty() {
+        DEFAULT_WORKER.to_string()
+    } else {
+        w
+    }
+}
+
 /// Shares kept for PPLNS and statistics.
 const MAX_WINDOW: usize = 20_000;
 /// A job is refreshed (new transactions, time) after this many seconds even without a new tip.
@@ -87,8 +105,11 @@ pub struct Pool {
     path: PathBuf,
     jobs: Vec<Job>,
     seen: HashSet<(Hash, u64, u32, u32)>,
-    window: VecDeque<(Hash, u64)>,
+    /// Recent shares: (payee, time, worker).
+    window: VecDeque<(Hash, u64, String)>,
     miners: HashMap<Hash, MinerStats>,
+    /// Per device ("worker") under a payee: statistics only, rewards go to the payee.
+    workers: HashMap<(Hash, String), MinerStats>,
     balances: HashMap<Hash, u64>,
     immature: Vec<Credit>,
     found: Vec<Found>,
@@ -113,6 +134,7 @@ impl Pool {
             seen: HashSet::new(),
             window: VecDeque::new(),
             miners: HashMap::new(),
+            workers: HashMap::new(),
             balances: HashMap::new(),
             immature: Vec::new(),
             found: Vec::new(),
@@ -134,7 +156,8 @@ impl Pool {
         let v = json!({
             "balances": map(&self.balances),
             "miners": self.miners.iter().map(|(k, s)| (hex(k), json!([s.shares, s.rejected, s.last, s.paid]))).collect::<serde_json::Map<_, _>>(),
-            "window": self.window.iter().map(|(m, t)| json!([hex(m), t])).collect::<Vec<_>>(),
+            "window": self.window.iter().map(|(m, t, w)| json!([hex(m), t, w])).collect::<Vec<_>>(),
+            "workers": self.workers.iter().map(|((m, w), s)| json!([hex(m), w, s.shares, s.rejected, s.last])).collect::<Vec<_>>(),
             "immature": self.immature.iter().map(|c| json!({"block": hex(&c.block), "height": c.height,
                 "credits": c.credits.iter().map(|(m, a)| json!([hex(m), a])).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "found": self.found.iter().map(|f| json!([f.height, hex(&f.id), f.time, hex(&f.finder), f.reward, f.status])).collect::<Vec<_>>(),
@@ -167,7 +190,14 @@ impl Pool {
         }
         for e in v["window"].as_array().into_iter().flatten() {
             if let (Some(m), Some(t)) = (h32(&e[0]), e[1].as_u64()) {
-                self.window.push_back((m, t));
+                self.window.push_back((m, t, e[2].as_str().unwrap_or(DEFAULT_WORKER).to_string()));
+            }
+        }
+        for e in v["workers"].as_array().into_iter().flatten() {
+            if let (Some(m), Some(w)) = (h32(&e[0]), e[1].as_str()) {
+                let n = |i: usize| e[i].as_u64().unwrap_or(0);
+                self.workers
+                    .insert((m, w.to_string()), MinerStats { shares: n(2), rejected: n(3), last: n(4), paid: 0 });
             }
         }
         for c in v["immature"].as_array().into_iter().flatten() {
@@ -211,7 +241,7 @@ impl Pool {
         }
         let distributable = reward - reward * self.cfg.fee_bp / 10_000;
         let mut counts: HashMap<Hash, u64> = HashMap::new();
-        for (m, _) in self.window.iter().rev().take(n) {
+        for (m, _, _) in self.window.iter().rev().take(n) {
             *counts.entry(*m).or_default() += 1;
         }
         let mut v: Vec<(Hash, u64)> =
@@ -278,6 +308,13 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
     let piece: Vec<i8> =
         unhex(p.get(4).and_then(|v| v.as_str()).ok_or("piece")?)?.into_iter().map(|x| x as i8).collect();
     let miner = p.get(5).and_then(h32).ok_or("payee: the miner's 32-byte key hash is required by the pool")?;
+    let worker = worker_name(p.get(6));
+    let reject = |st: &mut State| {
+        with_pool(st, |_, pool| {
+            pool.miners.entry(miner).or_default().rejected += 1;
+            pool.workers.entry((miner, worker.clone())).or_default().rejected += 1;
+        })
+    };
 
     // 1. cheap checks under the lock
     let (epoch, threads, block, share_target, net) = {
@@ -302,7 +339,7 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
         match r {
             Ok(x) => x,
             Err(why) => {
-                with_pool(&mut st, |_, pool| pool.miners.entry(miner).or_default().rejected += 1);
+                reject(&mut st);
                 return Ok(json!({"accepted": false, "reason": why}));
             }
         }
@@ -312,18 +349,19 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
     // 3. record
     let mut st = shared.lock().unwrap();
     if !valid {
-        with_pool(&mut st, |_, pool| pool.miners.entry(miner).or_default().rejected += 1);
+        reject(&mut st);
         return Ok(json!({"accepted": false, "reason": "invalid share"}));
     }
     let t = now();
     with_pool(&mut st, |_, pool| {
-        pool.window.push_back((miner, t));
+        pool.window.push_back((miner, t, worker.clone()));
         while pool.window.len() > MAX_WINDOW {
             pool.window.pop_front();
         }
-        let s = pool.miners.entry(miner).or_default();
-        s.shares += 1;
-        s.last = t;
+        for s in [pool.miners.entry(miner).or_default(), pool.workers.entry((miner, worker.clone())).or_default()] {
+            s.shares += 1;
+            s.last = t;
+        }
     });
     let h = tnet::ticket_hash(&piece, &digest, nonce, i, c);
     let is_block = tnet::meets_target(&h, &block.header.target.to_be_bytes());
@@ -478,12 +516,15 @@ pub fn stats(st: &State) -> Option<Value> {
     let t = now();
     let share_work = 2f64.powi(pool.cfg.share_bits as i32);
     let mut recent: HashMap<Hash, u64> = HashMap::new();
-    for (m, at) in pool.window.iter().rev() {
+    let mut recent_w: HashMap<(Hash, &str), u64> = HashMap::new();
+    for (m, at, w) in pool.window.iter().rev() {
         if t.saturating_sub(*at) > RATE_WINDOW {
             break;
         }
         *recent.entry(*m).or_default() += 1;
+        *recent_w.entry((*m, w.as_str())).or_default() += 1;
     }
+    let rate = |n: u64| n as f64 * share_work / RATE_WINDOW as f64;
     let mut immature: HashMap<Hash, u64> = HashMap::new();
     for c in &pool.immature {
         for (m, a) in &c.credits {
@@ -494,10 +535,19 @@ pub fn stats(st: &State) -> Option<Value> {
         .miners
         .iter()
         .map(|(m, s)| {
-            let r = recent.get(m).copied().unwrap_or(0) as f64 * share_work / RATE_WINDOW as f64;
-            json!({"address": address(net, m), "tickets_per_s": r, "shares": s.shares, "rejected": s.rejected,
-                   "last_share": s.last, "balance": pool.balances.get(m).copied().unwrap_or(0),
-                   "immature": immature.get(m).copied().unwrap_or(0), "paid": s.paid})
+            let mut workers: Vec<Value> = pool
+                .workers
+                .iter()
+                .filter(|((wm, _), _)| wm == m)
+                .map(|((_, w), ws)| {
+                    json!({"name": w, "tickets_per_s": rate(recent_w.get(&(*m, w.as_str())).copied().unwrap_or(0)),
+                           "shares": ws.shares, "rejected": ws.rejected, "last_share": ws.last})
+                })
+                .collect();
+            workers.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            json!({"address": address(net, m), "tickets_per_s": rate(recent.get(m).copied().unwrap_or(0)), "shares": s.shares,
+                   "rejected": s.rejected, "last_share": s.last, "balance": pool.balances.get(m).copied().unwrap_or(0),
+                   "immature": immature.get(m).copied().unwrap_or(0), "paid": s.paid, "workers": workers})
         })
         .collect();
     miners.sort_by(|a, b| b["tickets_per_s"].as_f64().partial_cmp(&a["tickets_per_s"].as_f64()).unwrap());
@@ -507,6 +557,9 @@ pub fn stats(st: &State) -> Option<Value> {
         "fee_percent": pool.cfg.fee_bp as f64 / 100.0,
         "share_bits": pool.cfg.share_bits,
         "min_payout": format_amount(pool.cfg.min_payout),
+        "min_payout_atoms": pool.cfg.min_payout,
+        "port": pool.cfg.listen.port(),
+        "maturity": net.maturity,
         "tickets_per_s": total_rate,
         "miners": miners,
         "blocks": pool.found.iter().rev().take(50).map(|f| json!({"height": f.height, "id": hex(&f.id), "time": f.time,
