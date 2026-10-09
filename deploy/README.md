@@ -25,6 +25,8 @@ The script creates the user and directories, installs the binary, writes the uni
 Blocks in `/var/lib/requant` are kept; on start the node replays them without re-verifying the work.
 
 Check a node: `journalctl -u requantd -f`, `curl -s -X POST 127.0.0.1:19334 -d '{"method":"getinfo","params":[]}'`.
+A node with the explorer also answers `GET /health` (JSON; HTTP 503 when it has no peers, no block for
+20 minutes, or is still syncing), for an uptime monitor.
 
 With `AUTO_UPDATE=1` the node runs with `--auto-update` and owns `/opt/requant`, so it can replace its
 binary with a newer signed release (see `TESTNET.md`, Updates).

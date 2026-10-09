@@ -60,8 +60,16 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
             }
         }
     }
-    let (status, body) = route(shared, &path, &host);
     let mut stream = stream;
+    if path == "/health" {
+        let (status, body) = health(&shared.lock().unwrap());
+        return write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
+    let (status, body) = route(shared, &path, &host);
     if let Some(loc) = body.strip_prefix("REDIRECT ") {
         return write!(
             stream,
@@ -73,6 +81,37 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
         "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
+}
+
+/// A block is overdue after this many seconds (20 times the target spacing).
+pub const STALE_AFTER: u64 = 1200;
+
+/// `/health` for uptime monitors: 200 with `"ok"` while blocks arrive and peers are connected, 503 with
+/// the reason otherwise.
+fn health(st: &crate::node::State) -> (&'static str, String) {
+    let tip = st.chain.block(&st.chain.tip()).unwrap();
+    let age = now().saturating_sub(tip.header.time);
+    let peers = st.peer_count();
+    let problem = if peers == 0 {
+        Some("no peers")
+    } else if age > STALE_AFTER {
+        Some("no new block for a long time")
+    } else if st.headers.height() > st.chain.height() + 10 {
+        Some("syncing")
+    } else {
+        None
+    };
+    let body = serde_json::json!({
+        "status": problem.unwrap_or("ok"),
+        "height": st.chain.height(),
+        "tip_age_s": age,
+        "peers": peers,
+        "version": crate::node::VERSION,
+        "update_available": st.release.as_ref().filter(|r| r.version > crate::release::own_version())
+            .map(|r| r.version_string()),
+    })
+    .to_string();
+    (if problem.is_some() { "503 Service Unavailable" } else { "200 OK" }, body)
 }
 
 fn hex(b: &[u8]) -> String {

@@ -134,6 +134,11 @@ fn main() {
                 std::thread::sleep(Duration::from_secs(60));
                 let st = h.shared.lock().unwrap();
                 eprintln!("height {} peers {} mempool {}", st.chain.height(), st.peer_count(), st.mempool.len());
+                let tip_time = st.chain.block(&st.chain.tip()).map(|b| b.header.time).unwrap_or(0);
+                let age = requant_node::node::now().saturating_sub(tip_time);
+                if age > requant_node::explorer::STALE_AFTER && st.chain.height() > 0 {
+                    eprintln!("warning: no new block for {} min (check peers and miners)", age / 60);
+                }
             }
         }
         Err(e) => {
