@@ -266,3 +266,45 @@ fn development_fund_share_and_sunset() {
     tx.sign(&chain.net.chain_id, &[&dev]);
     extend(&mut chain, &miner, vec![tx]);
 }
+
+#[test]
+fn trusted_replay_locator_and_spend_checks() {
+    let mut chain = Chain::new(Network::regtest(), 1);
+    let alice = key(1);
+    let mut blocks = Vec::new();
+    for _ in 0..12 {
+        blocks.push(extend(&mut chain, &addr(&alice), vec![]));
+    }
+    // replay without the work check reaches the same state
+    let mut replay = Chain::new(Network::regtest(), 1);
+    for b in &blocks {
+        replay.accept_trusted(b.clone()).unwrap();
+    }
+    assert_eq!(replay.tip(), chain.tip());
+    assert_eq!(replay.coins_of(&addr(&alice)), chain.coins_of(&addr(&alice)));
+    // a trusted replay still enforces the transaction rules
+    let mut greedy = chain.template(&addr(&alice), vec![], time_of(&chain, 13));
+    if let Tx::Coinbase { outputs, .. } = &mut greedy.txs[0] {
+        outputs[0].value += 1;
+    }
+    greedy.header.tx_root = tx_root(&greedy.txs);
+    assert!(replay.accept_trusted(greedy).is_err());
+
+    // locator and blocks_after
+    let loc = chain.locator();
+    assert_eq!(loc[0], chain.tip());
+    assert_eq!(*loc.last().unwrap(), chain.active_id(0).unwrap());
+    let fresh = Chain::new(Network::regtest(), 1);
+    assert_eq!(
+        chain.blocks_after(&fresh.locator(), 5),
+        (1..=5).map(|h| chain.active_id(h).unwrap()).collect::<Vec<_>>()
+    );
+    assert!(chain.blocks_after(&loc, 5).is_empty());
+
+    // spend checks for the mempool
+    let op = OutPoint { txid: blocks[0].txs[0].txid(), vout: 0 };
+    let tx = spend(&chain, &alice, op, &addr(&key(2)), 5000);
+    assert_eq!(chain.check_spend(&tx), Ok(1000));
+    let bob_steals = spend(&chain, &key(2), op, &addr(&key(2)), 5000);
+    assert_eq!(chain.check_spend(&bob_steals), Err(Error::Invalid("input key does not match the output")));
+}

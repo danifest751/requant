@@ -30,7 +30,8 @@ years that ends by itself.
 
 ## Quick start
 
-Rust (stable, no third-party crates) and Python 3.10+ with `pytest`:
+Rust (stable; the `tnet` crate has no dependencies, the chain uses `ed25519-dalek` and `serde_json`) and
+Python 3.10+ with `pytest`:
 
 ```sh
 python scripts/check.py                      # pytest, rustfmt, clippy -D warnings, cargo test
@@ -40,11 +41,20 @@ cargo run --release --bin tnet -- bench      # CPU verification time at the v1 p
 
 GPU attempt benchmark (CUDA, cuBLAS): [`miner/cuda/`](miner/cuda/README.md).
 
+A local regtest node that mines on the CPU (instant blocks, small work function):
+
+```sh
+cargo run --release --bin requantd -- --network regtest --mine <32-byte key hash, hex>
+curl -s -X POST 127.0.0.1:19445 -d '{"method":"getinfo","params":[]}'
+```
+
 ## Layout
 
 ```
 SPEC.md          TNet v1 work function (normative)
 crates/tnet/     Rust reference: derivations, verifier (Epoch), CLI (vectors, check, bench)
+crates/consensus/ chain rules of CHAIN.md: transactions, blocks, difficulty, emission, chain state
+crates/node/     requantd: storage, peer-to-peer sync and relay, mempool, JSON-RPC, regtest miner
 reference/       pure-Python reference written from SPEC.md
 vectors/         frozen test vectors
 miner/cuda/      GPU attempt benchmark, the starting point of the miner

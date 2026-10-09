@@ -129,6 +129,60 @@ impl Chain {
         v
     }
 
+    /// Block ids from the tip back to genesis at exponentially growing distances (sync locator).
+    pub fn locator(&self) -> Vec<Hash> {
+        let mut v = Vec::new();
+        let mut h = self.height() as i64;
+        let mut step = 1i64;
+        while h > 0 {
+            v.push(self.active[h as usize]);
+            if v.len() >= 10 {
+                step *= 2;
+            }
+            h -= step;
+        }
+        v.push(self.active[0]);
+        v
+    }
+
+    /// Ids of active blocks after the first locator entry found on the active chain (at most `max`).
+    pub fn blocks_after(&self, locator: &[Hash], max: usize) -> Vec<Hash> {
+        let start = locator
+            .iter()
+            .find(|id| self.entries.contains_key(*id) && self.on_active(id))
+            .map(|id| self.entries[id].height)
+            .unwrap_or(0);
+        self.active.iter().skip(start as usize + 1).take(max).copied().collect()
+    }
+
+    /// Fee of a transfer spendable in the next block on the tip (inputs unspent, keys matching, coinbase
+    /// outputs mature); signatures and shape are checked by [`Tx::check_standalone`].
+    pub fn check_spend(&self, tx: &Tx) -> Result<u64, Error> {
+        let Tx::Transfer { inputs, outputs } = tx else { return Err(Error::Invalid("coinbase outside a block")) };
+        let next = self.height() + 1;
+        let mut total_in: u64 = 0;
+        for inp in inputs {
+            let coin = self.utxo.get(&inp.prev).ok_or(Error::Invalid("missing or spent input"))?;
+            if pkh(&inp.pubkey) != coin.output.pkh {
+                return Err(Error::Invalid("input key does not match the output"));
+            }
+            if coin.coinbase && next - coin.height < self.net.maturity {
+                return Err(Error::Invalid("immature coinbase spend"));
+            }
+            total_in = total_in
+                .checked_add(coin.output.value)
+                .filter(|&t| t <= MAX_AMOUNT)
+                .ok_or(Error::Invalid("input total"))?;
+        }
+        let total_out: u64 = outputs.iter().map(|o| o.value).sum();
+        total_in.checked_sub(total_out).ok_or(Error::Invalid("outputs exceed inputs"))
+    }
+
+    /// Height of a known block.
+    pub fn height_of(&self, id: &Hash) -> Option<u64> {
+        self.entries.get(id).map(|e| e.height)
+    }
+
     /// Atoms issued up to and including the tip.
     pub fn issued(&self) -> u64 {
         self.entries[&self.tip()].issued
@@ -185,8 +239,9 @@ impl Chain {
         self.epochs.last().unwrap().1.clone()
     }
 
-    /// Header rules against the parent (CHAIN.md §5 items 1–4); `now` is the local clock.
-    fn check_header(&mut self, block: &Block, now: u64) -> Result<(), Error> {
+    /// Header rules against the parent (CHAIN.md §5 items 1–4); `now` is the local clock. `trusted` skips
+    /// the clock and the work claim (blocks this node already verified, replayed from its own storage).
+    fn check_header(&mut self, block: &Block, now: u64, trusted: bool) -> Result<(), Error> {
         let h = &block.header;
         let parent = self.entries.get(&h.prev).ok_or(Error::UnknownParent)?;
         if parent.status == Status::Invalid {
@@ -199,11 +254,14 @@ impl Chain {
         if h.time <= self.median_time_past(&h.prev) {
             return Err(Error::Invalid("time not after median time past"));
         }
-        if h.time > now + MAX_FUTURE_SECS {
+        if !trusted && h.time > now + MAX_FUTURE_SECS {
             return Err(Error::Invalid("time too far in the future"));
         }
         if h.target != next_target(&self.net, p_height, p_time) {
             return Err(Error::Invalid("target"));
+        }
+        if trusted {
+            return Ok(());
         }
         let seed = self.epoch_seed(&h.prev, h.height);
         let epoch = self.epoch(&seed);
@@ -219,12 +277,22 @@ impl Chain {
 
     /// Validate and store a block, switching the best chain if it now has the most work.
     pub fn accept(&mut self, block: Block, now: u64) -> Result<Accepted, Error> {
+        self.accept_inner(block, now, false)
+    }
+
+    /// Re-accept a block this node verified before (from its own storage): the work claim is not
+    /// recomputed; every other rule, including all transaction checks, still applies.
+    pub fn accept_trusted(&mut self, block: Block) -> Result<Accepted, Error> {
+        self.accept_inner(block, 0, true)
+    }
+
+    fn accept_inner(&mut self, block: Block, now: u64, trusted: bool) -> Result<Accepted, Error> {
         let id = block.id(&self.net);
         if self.entries.contains_key(&id) {
             return Err(Error::Duplicate);
         }
         block.check_standalone(&self.net)?;
-        self.check_header(&block, now)?;
+        self.check_header(&block, now, trusted)?;
         let parent = &self.entries[&block.header.prev];
         let entry = Entry {
             height: block.header.height,

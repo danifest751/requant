@@ -30,11 +30,22 @@ test network.
 
 ## 2. Node
 
-- [ ] Block and header validation (claim check order of `SPEC.md` §7, peer banning on failure).
-- [ ] Transactions and ledger model (UTXO or accounts), signatures (**owner** for the model).
-- [ ] P2P: header-first sync, block relay, bounded resources.
-- [ ] Storage, reorgs, cumulative-work fork choice.
-- [ ] RPC and a minimal wallet.
+- [x] Block and header validation (claim check order of `SPEC.md` §7; peers sending invalid blocks are
+      disconnected) — `crates/consensus`.
+- [x] UTXO ledger with ed25519 signatures (**owner**: UTXO).
+- [x] Storage (append-only block file, replay on start), reorgs, cumulative-work fork choice.
+- [x] P2P v0: block-first sync by locator, block and transaction relay, orphan pool, bounded messages —
+      `crates/node` (`requantd`).
+- [x] Mempool (no chains of unconfirmed transactions yet) and JSON-RPC (`getinfo`, `getblock`,
+      `getwork`/`submitwork`, `sendtx`, `utxos`, `addpeer`, `peers`).
+- [ ] Wallet CLI: key generation, addresses, balance, send.
+- [ ] Headers-first sync; peer discovery and address gossip; persistent ban list.
+- [ ] Deep-fork protection: a low-difficulty fork far below the tip costs little work and, at an epoch
+      boundary, a weight derivation (7 s); limit reorg depth or require minimum chain work.
+- [ ] Derive the next epoch's weights in the background (now under the node lock).
+- [ ] Keep a UTXO snapshot instead of replaying all blocks on start; transaction index.
+- [ ] Return transactions of disconnected blocks to the pool after a reorg.
+- [ ] RPC authentication (now: no auth, bind to localhost only).
 
 ## 3. Miner
 
