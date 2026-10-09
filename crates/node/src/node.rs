@@ -1005,8 +1005,10 @@ pub fn epoch_for(shared: &Shared, seed: &Hash, keep: &[Hash]) -> Arc<tnet::Epoch
         (st.chain.net.tnet, st.epoch_dir.clone())
     };
     let t = std::time::Instant::now();
-    // large weights go to a file the OS caches (see `epochs`); small ones (regtest) stay in memory
-    let on_disk = params.layers * params.n * params.n >= 64 << 20;
+    // large weights go to a file the OS caches (see `epochs`); small ones (regtest) stay in memory unless
+    // REQUANT_EPOCH_FILES=1 (to exercise the file path in tests)
+    let on_disk =
+        params.layers * params.n * params.n >= 64 << 20 || std::env::var("REQUANT_EPOCH_FILES").as_deref() == Ok("1");
     let epoch = Arc::new(match on_disk.then(|| crate::epochs::open_or_derive(&dir, seed, params, keep)) {
         Some(Ok(e)) => e,
         Some(Err(e)) => {
