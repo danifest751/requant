@@ -172,6 +172,8 @@ dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 18px;background:va
 dt{color:var(--mut)}dd{margin:0;word-break:break-all}
 footer{color:var(--mut);font-size:13px;margin:32px 0 8px;text-align:center}
 .empty{color:var(--mut);padding:18px;text-align:center}
+tr.addr td{font-weight:600;border-bottom:none}tr.sub td{font-size:13px;padding-top:3px;padding-bottom:3px;border-bottom:none}tr.sub.last td{border-bottom:1px solid var(--line);padding-bottom:10px}
+tr.sub td:first-child{padding-left:22px}.tree{color:var(--line);margin-right:8px;font-family:ui-monospace,monospace}tr.addr td .mut{font-weight:400}
 .wrap{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto;box-shadow:var(--shadow)}
 .card b{display:block;font-size:20px;font-weight:700}.card span{color:var(--mut);font-size:12px}
 "#;
@@ -495,31 +497,37 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
         let a = m["address"].as_str().unwrap_or("");
         let bal = n(&m["balance"]);
         let pct = (bal as f64 / min_payout as f64 * 100.0).min(100.0);
-        let mut workers = String::new();
-        for w in m["workers"].as_array().into_iter().flatten() {
-            let active = now().saturating_sub(n(&w["last_share"])) < 600;
-            workers += &format!(
-                "<tr><td><span class=\"dot {}\"></span>{}</td><td class=\"r\">{}tickets/s</td><td class=\"r\">{} shares</td><td class=\"r mut\">{}</td><td class=\"mut\">{}</td></tr>",
-                if active { "on-dot" } else { "off-dot" },
-                w["name"].as_str().unwrap_or(""),
-                si(f(&w["tickets_per_s"])),
-                n(&w["shares"]),
-                if n(&w["rejected"]) > 0 { format!("{} rejected", n(&w["rejected"])) } else { String::new() },
-                if n(&w["last_share"]) > 0 { format!("last share {} ago", ago(n(&w["last_share"]))) } else { String::new() },
-            );
-        }
+        let devices = m["workers"].as_array().cloned().unwrap_or_default();
+        // the address row carries the totals; each device follows as its own row, in the same columns
         body += &format!(
-            "<tr><td><details><summary><span class=\"chev\">▸</span><a class=\"mono\" href=\"/address/{a}\">{}</a> <span class=\"mut\">· {} device(s)</span></summary>\
-<table class=\"wk\">{workers}</table></details></td><td class=\"r\">{}tickets/s</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td>\
+            "<tr class=\"addr\"><td><a class=\"mono\" href=\"/address/{a}\">{}</a> <span class=\"mut\">· {} device{}</span></td>\
+<td class=\"r\">{}tickets/s</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td>\
 <td><div class=\"bar\" title=\"{pct:.0}% of the minimum payout\"><span style=\"width:{pct:.0}%\"></span></div></td><td class=\"r\">{}</td></tr>",
             short(a),
-            m["workers"].as_array().map(|w| w.len()).unwrap_or(0),
+            devices.len(),
+            if devices.len() == 1 { "" } else { "s" },
             si(f(&m["tickets_per_s"])),
             n(&m["shares"]),
             format_amount(n(&m["immature"])),
             format_amount(bal),
             format_amount(n(&m["paid"])),
         );
+        for (k, w) in devices.iter().enumerate() {
+            let active = now().saturating_sub(n(&w["last_share"])) < 600;
+            let rejected = n(&w["rejected"]);
+            body += &format!(
+                "<tr class=\"sub{}\"><td><span class=\"tree\">{}</span><span class=\"dot {}\"></span>{}</td><td class=\"r\">{}tickets/s</td>\
+<td class=\"r\">{}</td><td colspan=\"4\" class=\"mut\">{}{}</td></tr>",
+                if k + 1 == devices.len() { " last" } else { "" },
+                if k + 1 == devices.len() { "└" } else { "├" },
+                if active { "on-dot" } else { "off-dot" },
+                w["name"].as_str().unwrap_or(""),
+                si(f(&w["tickets_per_s"])),
+                n(&w["shares"]),
+                if n(&w["last_share"]) > 0 { format!("last share {} ago", ago(n(&w["last_share"]))) } else { "no shares yet".into() },
+                if rejected > 0 { format!(" · <span class=\"minus\">{rejected} rejected</span>") } else { String::new() },
+            );
+        }
     }
     body += "</tbody></table></div><h2>Blocks found by the pool</h2><div class=\"tbl\"><table><thead><tr><th>Height</th><th>Found</th><th>Status</th><th class=\"r\">Reward (RQT)</th></tr></thead><tbody>";
     if blocks.is_empty() {
