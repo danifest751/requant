@@ -27,14 +27,25 @@ a laptop or VPS CPU. JSON-RPC listens on `127.0.0.1:19334` only.
 
 ## Wallet
 
+The wallet talks to a node's RPC (`--rpc HOST:PORT`, default `127.0.0.1:19334`); the test network is the
+default (`--network regtest` for local tests).
+
 ```sh
-target/release/requant-wallet keygen my.key --network test        # asks a passphrase; prints address and key hash
-target/release/requant-wallet encrypt old.key --network test       # encrypt an older unencrypted key file
-target/release/requant-wallet balance <address> --network test
-target/release/requant-wallet history <address> --network test
-target/release/requant-wallet tx <txid> --network test
-target/release/requant-wallet send my.key <address> 1.5 --network test
+target/release/requant-wallet keygen my.key                # asks a passphrase; prints address and key hash
+target/release/requant-wallet encrypt old.key              # encrypt an older key file, or change the passphrase
+target/release/requant-wallet balance my.key               # an address works too, everywhere a key file is shown
+target/release/requant-wallet history my.key 20
+target/release/requant-wallet coins my.key                 # unspent outputs
+target/release/requant-wallet tx <txid>
+target/release/requant-wallet send my.key <address> 1.5    # shows amount and fee, asks before sending
+target/release/requant-wallet send my.key <addr1> 1 <addr2> 0.25   # several recipients in one transaction
+target/release/requant-wallet send my.key <address> all    # everything spendable, minus the fee
+target/release/requant-wallet consolidate my.key           # merge many small coins (e.g. pool payouts) into one
 ```
+
+The fee follows the transaction's size: `--fee-rate` atoms per byte (default 5, at least 1000 atoms). A
+transaction takes at most 600 inputs; with more coins, `send ... all` and `consolidate` handle the first
+600, so run them again. `--yes` skips the question (scripts).
 
 ## Mine in the pool (no node needed)
 

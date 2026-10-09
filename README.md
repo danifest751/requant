@@ -51,8 +51,8 @@ cargo run --release --bin requantd -- --network regtest --mine <32-byte key hash
 curl -s -X POST 127.0.0.1:19445 -d '{"method":"getinfo","params":[]}'
 ```
 
-Wallet: `requant-wallet keygen my.key`, then `--mine <key hash>` on the node, `requant-wallet balance <address>`,
-`requant-wallet send my.key <address> 1.5`.
+Wallet (regtest: add `--network regtest`): `requant-wallet keygen my.key`, then `--mine <key hash>` on the node,
+`requant-wallet balance my.key`, `requant-wallet send my.key <address> 1.5`; see `TESTNET.md` for the rest.
 
 ## Layout
 

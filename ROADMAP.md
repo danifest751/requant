@@ -39,8 +39,9 @@ test network.
       `getwork`/`submitwork`, `sendtx`, `utxos`, `addpeer`, `peers`).
 - [x] Wallet CLI (`requant-wallet`): key generation from the OS RNG, bech32m addresses (`rq1`, `trq1`,
       `rqrt1`), balance (confirmed, unconfirmed, immature), history, transaction details, send (also from
-      unconfirmed change). Key files are encrypted with a passphrase (Argon2id + XChaCha20-Poly1305;
-      `encrypt` converts older files). Next: several keys per wallet, hardware wallets.
+      unconfirmed change), several recipients per payment, `all`, coin listing and consolidation, fees
+      by size, a confirmation before sending. Key files are encrypted with a passphrase (Argon2id +
+      XChaCha20-Poly1305; `encrypt` converts older files). Next: several keys per wallet, hardware wallets.
 - [x] Node 0.2: protocol 2 (node id, listening port, agent; extensible greeting), address gossip with an
       on-disk address book and an outbound connection manager, pings and idle timeouts, one-hour bans for
       invalid data, transaction and address index (`history`, `gettx`), chains of unconfirmed

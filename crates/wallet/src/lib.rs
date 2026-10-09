@@ -17,7 +17,96 @@ pub struct Spendable {
     pub value: u64,
 }
 
-/// Pay `amount` to `to` from `coins` (largest first), change back to the key, `fee` to the miner.
+/// Default fee rate in atoms per byte, and the smallest fee the wallet pays.
+pub const DEFAULT_FEE_RATE: u64 = 5;
+pub const MIN_FEE: u64 = 1000;
+/// Inputs per transaction (a node accepts transactions up to 100 kB; an input takes 132 bytes).
+pub const MAX_INPUTS: usize = 600;
+
+/// Serialized size of a transfer with `inputs` inputs and `outputs` outputs (varints counted at 3 bytes).
+pub fn transfer_size(inputs: usize, outputs: usize) -> u64 {
+    (4 + 1 + 3 + 132 * inputs + 3 + 40 * outputs) as u64
+}
+
+/// Fee for that size at `rate` atoms per byte, at least `MIN_FEE`.
+pub fn fee_for(inputs: usize, outputs: usize, rate: u64) -> u64 {
+    transfer_size(inputs, outputs).saturating_mul(rate).max(MIN_FEE)
+}
+
+fn signed(net: &Network, key: &SigningKey, chosen: &[Spendable], outputs: Vec<Output>) -> Tx {
+    let inputs = chosen.iter().map(|c| Input { prev: c.op, pubkey: [0; 32], sig: [0; 64] }).collect();
+    let mut tx = Tx::Transfer { inputs, outputs };
+    let keys: Vec<&SigningKey> = chosen.iter().map(|_| key).collect();
+    tx.sign(&net.chain_id, &keys);
+    tx
+}
+
+/// Pay every `(to, amount)` of `payments` from `coins` (largest first), change back to the key, a fee of
+/// `rate` atoms per byte to the miner. Returns the transaction and its fee.
+pub fn build_payment(
+    net: &Network,
+    key: &SigningKey,
+    coins: &[Spendable],
+    payments: &[(Hash, u64)],
+    rate: u64,
+) -> Result<(Tx, u64), String> {
+    if payments.is_empty() || payments.iter().any(|p| p.1 == 0) {
+        return Err("every amount must be positive".into());
+    }
+    let pay = payments.iter().try_fold(0u64, |s, p| s.checked_add(p.1)).ok_or("amount too large")?;
+    let mut sorted = coins.to_vec();
+    sorted.sort_by_key(|c| std::cmp::Reverse(c.value));
+    let (mut chosen, mut total) = (Vec::new(), 0u64);
+    // with change, the fee covers one more output
+    let need = |n: usize| pay.saturating_add(fee_for(n, payments.len() + 1, rate));
+    for c in sorted {
+        if chosen.len() == MAX_INPUTS || total >= need(chosen.len()) {
+            break;
+        }
+        total += c.value;
+        chosen.push(c);
+    }
+    let fee = fee_for(chosen.len(), payments.len() + 1, rate);
+    if total < pay.saturating_add(fee) {
+        let what = if chosen.len() == MAX_INPUTS { " (too many small coins: run consolidate first)" } else { "" };
+        return Err(format!(
+            "insufficient funds: {} spendable, {} needed{what}",
+            format_amount(total),
+            format_amount(pay.saturating_add(fee))
+        ));
+    }
+    let mut outputs: Vec<Output> = payments.iter().map(|(to, v)| Output { value: *v, pkh: *to }).collect();
+    let change = total - pay - fee;
+    if change > 0 {
+        outputs.push(Output { value: change, pkh: owner_of(key) });
+    }
+    Ok((signed(net, key, &chosen, outputs), fee))
+}
+
+/// The first `MAX_INPUTS` of `coins`, in the order given, to `to` in one output, minus the fee. Returns the
+/// transaction, the amount sent and the fee. Largest first sends the most; smallest first, to one's own
+/// address, merges the dust.
+pub fn build_sweep(
+    net: &Network,
+    key: &SigningKey,
+    coins: &[Spendable],
+    to: &Hash,
+    rate: u64,
+) -> Result<(Tx, u64, u64), String> {
+    let chosen: Vec<Spendable> = coins.iter().take(MAX_INPUTS).copied().collect();
+    if chosen.is_empty() {
+        return Err("nothing spendable".into());
+    }
+    let total: u64 = chosen.iter().map(|c| c.value).sum();
+    let fee = fee_for(chosen.len(), 1, rate);
+    if total <= fee {
+        return Err(format!("{} spendable does not cover the fee {}", format_amount(total), format_amount(fee)));
+    }
+    let tx = signed(net, key, &chosen, vec![Output { value: total - fee, pkh: *to }]);
+    Ok((tx, total - fee, fee))
+}
+
+/// Pay `amount` to `to` with a fixed `fee` (kept for callers that set the fee themselves).
 pub fn build_transfer(
     net: &Network,
     key: &SigningKey,
@@ -47,11 +136,7 @@ pub fn build_transfer(
     if total > need {
         outputs.push(Output { value: total - need, pkh: owner_of(key) });
     }
-    let inputs = chosen.iter().map(|c| Input { prev: c.op, pubkey: [0; 32], sig: [0; 64] }).collect();
-    let mut tx = Tx::Transfer { inputs, outputs };
-    let keys: Vec<&SigningKey> = chosen.iter().map(|_| key).collect();
-    tx.sign(&net.chain_id, &keys);
-    Ok(tx)
+    Ok(signed(net, key, &chosen, outputs))
 }
 
 #[cfg(test)]
@@ -72,6 +157,39 @@ mod tests {
         assert_eq!(inputs.len(), 1);
         assert_eq!(outputs.iter().map(|o| o.value).collect::<Vec<_>>(), [900, 50]);
         assert!(build_transfer(&net, &key, &coins, &[9; 32], 1300, 1).is_err());
+    }
+
+    fn many(n: usize, value: u64) -> Vec<Spendable> {
+        (0..n).map(|k| Spendable { op: OutPoint { txid: [(k % 251) as u8; 32], vout: k as u32 }, value }).collect()
+    }
+
+    #[test]
+    fn payments_fees_and_sweeps() {
+        let net = Network::regtest();
+        let key = SigningKey::from_bytes(&[5; 32]);
+        // two recipients, fee from the size, change back
+        let coins = many(10, 100_000);
+        let (tx, fee) = build_payment(&net, &key, &coins, &[([1; 32], 150_000), ([2; 32], 20_000)], 5).unwrap();
+        tx.check_standalone(&net.chain_id).unwrap();
+        let Tx::Transfer { inputs, outputs } = &tx else { panic!() };
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(fee, fee_for(2, 3, 5));
+        assert!(tx.encode().len() as u64 <= transfer_size(2, 3));
+        assert_eq!(outputs.iter().map(|o| o.value).sum::<u64>() + fee, 200_000);
+        // the size estimate never undercounts, whatever the shape
+        for (i, o) in [(1, 1), (1, 2), (50, 1), (MAX_INPUTS, 1)] {
+            let (tx, _, _) = build_sweep(&net, &key, &many(i, 10_000_000), &[3; 32], 5).unwrap();
+            assert!(tx.encode().len() as u64 <= transfer_size(i, o), "{i} inputs");
+        }
+        // everything: one output of the total minus the fee, at most MAX_INPUTS coins per transaction
+        let (tx, sent, fee) = build_sweep(&net, &key, &many(700, 10_000), &[3; 32], 5).unwrap();
+        let Tx::Transfer { inputs, .. } = &tx else { panic!() };
+        assert_eq!(inputs.len(), MAX_INPUTS);
+        assert_eq!(sent + fee, MAX_INPUTS as u64 * 10_000);
+        assert!(tx.encode().len() < 100_000);
+        // too little for the amount plus the fee
+        assert!(build_payment(&net, &key, &many(1, 1000), &[([1; 32], 900)], 5).is_err());
+        assert!(build_sweep(&net, &key, &many(1, 500), &[3; 32], 5).is_err());
     }
 }
 
