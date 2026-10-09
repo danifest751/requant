@@ -8,3 +8,4 @@ set RPC=127.0.0.1:19334
 rem GPU number (0 = first) and rows per GPU pass (lower it to 2048 on GPUs with 4 GB or less).
 set DEVICE=0
 set BATCH=8192
+set POOL=193.187.93.29:19340

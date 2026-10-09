@@ -10,6 +10,7 @@ chain may be reset when the rules change (a reset changes the genesis time in `c
 | P2P port | 19333 |
 | Seed nodes | `193.187.93.29:19333`, `193.32.188.248:19333`, `185.174.40.96:19333` |
 | Explorer | http://193.187.93.29:19380/ |
+| Mining pool | `193.187.93.29:19340` (1% fee, PPLNS, payouts from 1 RQT; stats at http://193.187.93.29:19380/pool) |
 | Development fund | `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` (6%, `CHAIN.md` §8) |
 
 ## Run a node
@@ -35,7 +36,15 @@ target/release/requant-wallet tx <txid> --network test
 target/release/requant-wallet send my.key <address> 1.5 --network test
 ```
 
-## Mine (NVIDIA GPU)
+## Mine in the pool (no node needed)
+
+```sh
+cppminer --algo tnet --rpc 193.187.93.29:19340 --payee <key hash from requant-wallet>
+```
+
+Shares are credited PPLNS, rewards after 100 confirmations, paid automatically from 1 RQT.
+
+## Mine solo (NVIDIA GPU)
 
 Build CPPminer from the `feat/tnet-backend` branch of
 [danifest751/CPPminer](https://github.com/danifest751/CPPminer/tree/feat/tnet-backend) with CUDA and cuBLAS
