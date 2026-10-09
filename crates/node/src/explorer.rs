@@ -480,7 +480,7 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
         si(f(&s["tickets_per_s"])),
         miners.len(),
         devices,
-        blocks.len(),
+        n(&s["blocks_total"]),
         s["fee_percent"],
         format_amount(n(&s["min_payout_atoms"])).trim_end_matches('0').trim_end_matches('.'),
         s["share_bits"],

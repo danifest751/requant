@@ -559,6 +559,7 @@ pub fn stats(st: &State) -> Option<Value> {
         "share_bits": pool.cfg.share_bits,
         "min_payout": format_amount(pool.cfg.min_payout),
         "min_payout_atoms": pool.cfg.min_payout,
+        "blocks_total": pool.found.iter().filter(|f| f.status != "orphaned").count(),
         "port": pool.cfg.listen.port(),
         "maturity": net.maturity,
         "tickets_per_s": total_rate,
