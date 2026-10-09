@@ -139,7 +139,7 @@ th,td{{text-align:left;padding:7px 10px;border-bottom:1px solid var(--line);whit
 td.r,th.r{{text-align:right}}.mono{{font-family:ui-monospace,monospace;font-size:13px}}.wrap{{overflow-x:auto}}.mut{{color:var(--mut)}}\
 .plus{{color:#16a34a}}.minus{{color:#dc2626}}h2{{font-size:17px;margin:20px 0 8px}}dl{{display:grid;grid-template-columns:max-content 1fr;gap:4px 16px}}\
 dt{{color:var(--mut)}}dd{{margin:0;word-break:break-all}}footer{{color:var(--mut);font-size:13px;margin:24px 0}}\
-</style></head><body><main><header><a href=\"/\">Requant explorer</a><form action=\"/search\"><input name=\"q\" placeholder=\"Block height, block id, txid or address\" aria-label=\"Search\"></form></header>\
+</style></head><body><main><header><a href=\"/\">Requant explorer</a><a href=\"/pool\" style=\"font-size:15px;font-weight:500\">Pool</a><form action=\"/search\"><input name=\"q\" placeholder=\"Block height, block id, txid or address\" aria-label=\"Search\"></form></header>\
 {body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/danifest751/requant\">source</a></footer></main></body></html>"
     )
 }
@@ -173,6 +173,10 @@ fn route(shared: &Shared, path: &str) -> (&'static str, String) {
         ["", "address", a] => match parse_address(net, a) {
             Ok(owner) => ("200 OK", address_page(&st, &owner)),
             Err(_) => not_found("Address"),
+        },
+        ["", "pool"] => match crate::pool::stats(&st) {
+            Some(s) => ("200 OK", pool_page(&s)),
+            None => not_found("Pool (this node runs none)"),
         },
         ["", "search"] => {
             let q: String = query
@@ -400,6 +404,48 @@ fn address_page(st: &crate::node::State, owner: &Hash) -> String {
     }
     body += "</table></div>";
     page("Address", &body, false)
+}
+
+fn pool_page(s: &serde_json::Value) -> String {
+    let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+    let mut body = format!(
+        "<h2>Mining pool</h2><div class=\"cards\"><div class=\"card\"><b>{}tickets/s</b><span>pool rate (10 min)</span></div><div class=\"card\"><b>{}</b><span>miners</span></div><div class=\"card\"><b>{} %</b><span>fee</span></div><div class=\"card\"><b>2^{}</b><span>tickets per share</span></div><div class=\"card\"><b>{} RQT</b><span>minimum payout</span></div></div><p class=\"mut\">Connect CPPminer to this pool: <span class=\"mono\">cppminer --algo tnet --rpc HOST:19340 --payee &lt;your key hash&gt;</span>. Rewards are split over the last shares (PPLNS), credited after {} confirmations and paid automatically.</p>",
+        si(s["tickets_per_s"].as_f64().unwrap_or(0.0)),
+        s["miners"].as_array().map(|m| m.len()).unwrap_or(0),
+        s["fee_percent"],
+        s["share_bits"],
+        s["min_payout"].as_str().unwrap_or(""),
+        100
+    );
+    body += "<h2>Miners</h2><div class=\"wrap\"><table><tr><th>Address</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th><th class=\"r\">Immature (RQT)</th><th class=\"r\">Balance (RQT)</th><th class=\"r\">Paid (RQT)</th></tr>";
+    for m in s["miners"].as_array().into_iter().flatten() {
+        let a = m["address"].as_str().unwrap_or("");
+        body += &format!(
+            "<tr><td class=\"mono\"><a href=\"/address/{a}\">{}</a></td><td class=\"r\">{}tickets/s</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
+            short(a), si(m["tickets_per_s"].as_f64().unwrap_or(0.0)), n(&m["shares"]),
+            format_amount(n(&m["immature"])), format_amount(n(&m["balance"])), format_amount(n(&m["paid"]))
+        );
+    }
+    body += "</table></div><h2>Blocks found</h2><div class=\"wrap\"><table><tr><th>Height</th><th>Time (UTC)</th><th>Status</th><th class=\"r\">Reward (RQT)</th></tr>";
+    for b in s["blocks"].as_array().into_iter().flatten() {
+        body += &format!(
+            "<tr><td><a href=\"/block/{0}\">{0}</a></td><td>{1}</td><td>{2}</td><td class=\"r\">{3}</td></tr>",
+            n(&b["height"]),
+            utc(n(&b["time"])),
+            b["status"].as_str().unwrap_or(""),
+            format_amount(n(&b["reward"]))
+        );
+    }
+    body += "</table></div><h2>Payouts</h2><div class=\"wrap\"><table><tr><th>Transaction</th><th>Time (UTC)</th><th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr>";
+    for p in s["payouts"].as_array().into_iter().flatten() {
+        let t = p["txid"].as_str().unwrap_or("");
+        body += &format!(
+            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
+            short(t), utc(n(&p["time"])), n(&p["outputs"]), format_amount(n(&p["total"]))
+        );
+    }
+    body += "</table></div>";
+    page("Mining pool", &body, true)
 }
 
 fn row(txid: &str, height: String, time: String, received: u64, sent: u64) -> String {

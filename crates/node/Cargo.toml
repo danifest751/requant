@@ -1,6 +1,6 @@
 [package]
 name = "requant-node"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Requant full node: storage, peer-to-peer sync and relay, mempool, JSON-RPC, regtest CPU miner."
@@ -9,9 +9,9 @@ description = "Requant full node: storage, peer-to-peer sync and relay, mempool,
 tnet = { path = "../tnet" }
 requant-consensus = { path = "../consensus" }
 serde_json = "=1.0.140"
+ed25519-dalek = "=2.2.0"
 
 [dev-dependencies]
-ed25519-dalek = "=2.2.0"
 
 [[bin]]
 name = "requantd"

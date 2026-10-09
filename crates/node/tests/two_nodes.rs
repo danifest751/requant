@@ -35,6 +35,7 @@ fn node(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>) -> Handle {
         peer_interval: Duration::from_millis(300),
         discover: true,
         explorer: None,
+        pool: None,
     })
     .unwrap()
 }
@@ -258,6 +259,7 @@ fn headers_first_sync_from_two_peers() {
         peer_interval: Duration::from_millis(300),
         discover: false,
         explorer: None,
+        pool: None,
     })
     .unwrap();
     wait("a to mine 150 blocks", 120, || height(&a) >= 150);

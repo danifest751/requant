@@ -3,6 +3,8 @@
 //! requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...
 //!          [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS] [--rpc-token-file FILE]
 //!          [--no-discover] [--explorer ADDR] [--version]
+//!          [--pool ADDR --pool-key FILE [--pool-fee PERCENT] [--pool-share-bits N] [--pool-min-payout RQT]
+//!           [--pool-payout-every SECS]]
 
 use requant_consensus::params::Network;
 use requant_node::node::{agent, default_max_reorg, start, Config};
@@ -17,6 +19,8 @@ fn main() {
     let mut max_reorg = None::<u64>;
     let (mut rpc_token, mut discover) = (None::<String>, true);
     let mut explorer = None;
+    let (mut pool_addr, mut pool_key, mut pool_fee, mut share_bits) = (None, None::<[u8; 32]>, 1.0f64, 24u32);
+    let (mut min_payout, mut payout_every) = (100_000_000u64, 600u64);
     let mut k = 0;
     let value = |k: usize| args.get(k + 1).cloned().unwrap_or_else(|| usage(&format!("{} needs a value", args[k])));
     while k < args.len() {
@@ -26,6 +30,38 @@ fn main() {
             "--listen" => listen = Some(value(k)),
             "--rpc" => rpc = Some(value(k)),
             "--connect" => connect.push(value(k)),
+            "--pool" => pool_addr = Some(value(k).parse().unwrap_or_else(|_| usage("bad --pool address"))),
+            "--pool-key" => {
+                let f = value(k);
+                let t = std::fs::read_to_string(&f).unwrap_or_else(|e| usage(&format!("{f}: {e}")));
+                pool_key = Some(
+                    unhex(t.trim())
+                        .ok()
+                        .and_then(|v| v.try_into().ok())
+                        .unwrap_or_else(|| usage("--pool-key: unencrypted 64-hex key file")),
+                );
+            }
+            "--pool-fee" => {
+                pool_fee = value(k)
+                    .parse()
+                    .ok()
+                    .filter(|f| (0.0..=50.0).contains(f))
+                    .unwrap_or_else(|| usage("bad --pool-fee"))
+            }
+            "--pool-share-bits" => {
+                share_bits = value(k)
+                    .parse()
+                    .ok()
+                    .filter(|b| (1..=200).contains(b))
+                    .unwrap_or_else(|| usage("bad --pool-share-bits"))
+            }
+            "--pool-min-payout" => {
+                min_payout = requant_consensus::address::parse_amount(&value(k))
+                    .unwrap_or_else(|_| usage("bad --pool-min-payout"))
+            }
+            "--pool-payout-every" => {
+                payout_every = value(k).parse().unwrap_or_else(|_| usage("bad --pool-payout-every"))
+            }
             "--explorer" => explorer = Some(value(k).parse().unwrap_or_else(|_| usage("bad --explorer address"))),
             "--mine" => {
                 let h: [u8; 32] = unhex(&value(k))
@@ -74,6 +110,14 @@ fn main() {
         peer_interval: Duration::from_secs(15),
         discover,
         explorer,
+        pool: pool_addr.map(|listen| requant_node::pool::PoolConfig {
+            listen,
+            key: pool_key.unwrap_or_else(|| usage("--pool needs --pool-key")),
+            fee_bp: (pool_fee * 100.0).round() as u64,
+            share_bits,
+            min_payout,
+            payout_every,
+        }),
     };
     let net_name = cfg.net.name;
     match start(cfg) {

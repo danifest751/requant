@@ -81,6 +81,8 @@ pub struct Config {
     pub discover: bool,
     /// Serve the read-only block explorer here.
     pub explorer: Option<SocketAddr>,
+    /// Run a mining pool.
+    pub pool: Option<crate::pool::PoolConfig>,
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -130,6 +132,7 @@ pub struct State {
     bans: HashMap<IpAddr, u64>,
     allow_local: bool,
     pub started: u64,
+    pub pool: Option<crate::pool::Pool>,
 }
 
 pub type Shared = Arc<Mutex<State>>;
@@ -138,6 +141,8 @@ pub struct Handle {
     pub shared: Shared,
     pub p2p: SocketAddr,
     pub rpc: Option<SocketAddr>,
+    /// The pool's public JSON-RPC address, if a pool runs.
+    pub pool: Option<SocketAddr>,
     pub stop: Arc<AtomicBool>,
 }
 
@@ -708,6 +713,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         bans: HashMap::new(),
         allow_local,
         started: now(),
+        pool: cfg.pool.clone().map(|p| crate::pool::Pool::new(p, dir.join("pool.json"))),
     };
     let shared: Shared = Arc::new(Mutex::new(state));
     let stop = Arc::new(AtomicBool::new(false));
@@ -729,6 +735,14 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         Some(a) => Some(crate::rpc::serve(shared.clone(), a, cfg.rpc_token.clone())?),
         None => None,
     };
+    let pool = match &cfg.pool {
+        Some(p) => {
+            let at = crate::pool::serve(shared.clone(), p.listen)?;
+            eprintln!("pool on {at}");
+            Some(at)
+        }
+        None => None,
+    };
     if let Some(a) = cfg.explorer {
         let at = crate::explorer::serve(shared.clone(), a)?;
         eprintln!("explorer on http://{at}");
@@ -741,7 +755,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         let (shared, stop, interval) = (shared.clone(), stop.clone(), cfg.mine_interval);
         std::thread::spawn(move || cpu_miner(shared, payee, stop, interval));
     }
-    Ok(Handle { shared, p2p, rpc, stop })
+    Ok(Handle { shared, p2p, rpc, pool, stop })
 }
 
 /// Keep `--connect` peers connected, fill outbound slots from the address book, ping peers, save the book.

@@ -8,6 +8,8 @@ use requant_consensus::tx::{Hash, Tx};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+use std::sync::Arc;
 
 const MAX_BODY: usize = 4 << 20;
 
@@ -31,13 +33,35 @@ fn u64_param(v: &Value) -> Result<u64, String> {
 }
 
 pub fn serve(shared: Shared, addr: SocketAddr, token: Option<String>) -> io::Result<SocketAddr> {
+    let handler: Handler = Arc::new(move |method: &str, params: &[Value]| call(&shared, method, params));
+    serve_with(addr, token, MAX_BODY, usize::MAX, handler)
+}
+
+/// A JSON-RPC method dispatcher.
+pub type Handler = Arc<dyn Fn(&str, &[Value]) -> Result<Value, String> + Send + Sync>;
+
+/// Serve JSON-RPC over HTTP with `handler`, at most `max_active` requests at once and `max_body` bytes
+/// per request; with a token, requests must carry it.
+pub fn serve_with(
+    addr: SocketAddr,
+    token: Option<String>,
+    max_body: usize,
+    max_active: usize,
+    handler: Handler,
+) -> io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
+    let active = Arc::new(AtomicUsize::new(0));
     std::thread::spawn(move || {
         for s in listener.incoming().flatten() {
-            let (shared, token) = (shared.clone(), token.clone());
+            if active.fetch_add(1, SeqCst) >= max_active {
+                active.fetch_sub(1, SeqCst);
+                continue;
+            }
+            let (token, handler, active) = (token.clone(), handler.clone(), active.clone());
             std::thread::spawn(move || {
-                let _ = handle(shared, s, token);
+                let _ = handle(s, token, max_body, &handler);
+                active.fetch_sub(1, SeqCst);
             });
         }
     });
@@ -49,7 +73,7 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn handle(shared: Shared, stream: TcpStream, token: Option<String>) -> io::Result<()> {
+fn handle(stream: TcpStream, token: Option<String>, max_body: usize, handler: &Handler) -> io::Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let (mut len, mut auth) = (0usize, None::<String>);
@@ -76,7 +100,7 @@ fn handle(shared: Shared, stream: TcpStream, token: Option<String>) -> io::Resul
             return respond(stream, &json!({"result": null, "error": "unauthorized"}));
         }
     }
-    if len > MAX_BODY {
+    if len > max_body {
         return respond(stream, &json!({"result": null, "error": "request too large"}));
     }
     let mut body = vec![0u8; len];
@@ -86,7 +110,7 @@ fn handle(shared: Shared, stream: TcpStream, token: Option<String>) -> io::Resul
             let method = req["method"].as_str().unwrap_or("");
             let empty = vec![];
             let params = req["params"].as_array().unwrap_or(&empty);
-            match call(&shared, method, params) {
+            match handler(method, params) {
                 Ok(r) => json!({"result": r, "error": null}),
                 Err(e) => json!({"result": null, "error": e}),
             }

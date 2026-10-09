@@ -67,7 +67,9 @@ test network.
       Mined 20 regtest blocks and 15 blocks at the TNet v1 parameters into `requantd` (CMP 50HX).
 - [ ] Merge into CPPminer's release builds; Windows build; several GPUs in one process.
 - [ ] Optional fused requantization in the GEMM epilogue, bit-exact with `SPEC.md` §5.
-- [ ] Pool protocol (share = ticket at a lower target).
+- [x] Mining pool in the node (`--pool`, node 0.4): the node's getwork/submitwork with a share target,
+      PPLNS rewards credited at maturity, automatic multi-output payouts, state in `pool.json`, explorer
+      page `/pool`; CPPminer sends its payee with each share.
 
 ## 4. Network launch
 
