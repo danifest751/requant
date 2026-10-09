@@ -26,7 +26,7 @@ fn message_decoder_never_panics() {
             tip: [1; 32],
             node_id: 5,
             listen_port: 19333,
-            agent: "requantd/0.7.0".into(),
+            agent: "requantd/0.7.1".into(),
         },
         Msg::GetBlocks(vec![[2; 32]; 3]),
         Msg::Inv(vec![[3; 32]; 4]),
@@ -37,6 +37,7 @@ fn message_decoder_never_panics() {
         Msg::GetAddr,
         Msg::Ping(7),
         Msg::Tx(vec![0; 40]),
+        Msg::Release(vec![5, 0, b'h', b'e', b'l', b'l', b'o'].into_iter().chain([0; 64]).collect()),
     ];
     let frames: Vec<Vec<u8>> = samples
         .iter()
