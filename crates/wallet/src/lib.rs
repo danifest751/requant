@@ -247,3 +247,15 @@ mod tests {
         assert!(build_transfer(&net, &key, &coins, &[9; 32], 1300, 1).is_err());
     }
 }
+
+#[cfg(test)]
+mod fund {
+    #[test]
+    fn test_network_fund_address() {
+        let net = requant_consensus::params::Network::test();
+        assert_eq!(
+            super::address(&net, &net.dev_fund),
+            "trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems"
+        );
+    }
+}

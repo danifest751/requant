@@ -25,8 +25,8 @@ test network.
       (derive the next weights in the background; 512 MiB per epoch held).
 - [ ] Header layout and `header_digest`; block id; genesis.
 - [x] Emission: smooth curve with a 0.25 RQT tail; 6% development fund for heights 1..2^21 (**owner**).
-- [ ] Before the test network starts: the owner's fund key hash and the genesis time in
-      `crates/consensus/src/params.rs` (**owner**).
+- [x] Test network fund key: `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` (**owner**).
+- [ ] Before the test network starts: the genesis time in `crates/consensus/src/params.rs`.
 
 ## 2. Node
 

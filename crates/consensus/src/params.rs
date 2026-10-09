@@ -33,9 +33,12 @@ pub const REGTEST_GENESIS_TIME: u64 = 1_791_504_000;
 /// Development fund: 6% of the block reward for heights `1..=2^21` (about four years).
 pub const DEV_FUND_PERCENT: u64 = 6;
 pub const DEV_FUND_LAST: u64 = 1 << 21;
-/// Test network fund owner: to be replaced by the owner's key hash before the test network starts. The
-/// all-zero hash has no known key, so outputs to it are unspendable (burnt), never claimable by anyone.
-pub const TEST_DEV_FUND: [u8; 32] = [0; 32];
+/// Test network fund owner: key hash of the project owner's fund key,
+/// address `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems`.
+pub const TEST_DEV_FUND: [u8; 32] = [
+    0x62, 0x6c, 0x8a, 0xec, 0x88, 0x5a, 0x2d, 0x85, 0xdc, 0x50, 0x9c, 0x9a, 0x14, 0x01, 0xbc, 0x93, 0x7a, 0x76, 0x6c,
+    0xaa, 0xc2, 0x34, 0xa6, 0x76, 0x0f, 0x3f, 0x49, 0xff, 0xf2, 0xe9, 0xa2, 0x01,
+];
 
 /// Publicly known regtest fund key (`[0xde; 32]`); for tests only.
 pub fn regtest_dev_key() -> ed25519_dalek::SigningKey {

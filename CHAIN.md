@@ -26,7 +26,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 | `pow_limit` (largest target) | `2^240 - 1` | `2^248 - 1` | `2^255 - 1` |
 | genesis target | set at launch | `pow_limit` | `pow_limit` |
 | coinbase maturity | 100 | 100 | 2 |
-| development fund (§8) | 6%, heights 1..2^21, key set at launch | same; key set at test launch | 6%, heights 1..8, public test key |
+| development fund (§8) | 6%, heights 1..2^21, key set at launch | same, `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` | 6%, heights 1..8, public test key |
 
 `chain_id = H("requant/chain", name)`. Regtest exists for tests and local development; its small work
 function makes CPU mining instant. The main network's genesis target is chosen at launch from the
