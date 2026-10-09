@@ -3,7 +3,7 @@
 
 use crate::block::{genesis, Block, Claim, Header, BLOCK_VERSION};
 use crate::params::{tagged, Network, MAX_AMOUNT, MAX_FUTURE_SECS, MTP_WINDOW};
-use crate::pow::{next_target, reward};
+use crate::pow::{dev_fund_share, next_target, reward};
 use crate::tx::{pkh, Hash, OutPoint, Output, Tx};
 use crate::u256::U256;
 use crate::Error;
@@ -368,6 +368,11 @@ impl Chain {
             if height > 0 && paid > reward(parent_issued) + fees {
                 return Err(Error::Invalid("coinbase pays more than reward plus fees"));
             }
+            let due = dev_fund_share(&self.net, height, reward(parent_issued));
+            let to_fund: u64 = coinbase.outputs().iter().filter(|o| o.pkh == self.net.dev_fund).map(|o| o.value).sum();
+            if to_fund < due {
+                return Err(Error::Invalid("coinbase misses the development fund share"));
+            }
             self.add_outputs(coinbase, height, true, &mut added);
             Ok(())
         })();
@@ -416,7 +421,7 @@ impl Chain {
         self.active.pop();
     }
 
-    /// A block on the tip paying `reward + fees` to `payee`, with `txs` (unchecked), dated
+    /// A block on the tip paying `reward + fees` to `payee` (less the development fund share, paid to the fund), with `txs` (unchecked), dated
     /// `max(time, median time past + 1)`, and an empty claim to be filled by a miner.
     pub fn template(&self, payee: &Hash, txs: Vec<Tx>, time: u64) -> Block {
         self.template_on(&self.tip(), payee, txs, time)
@@ -434,11 +439,13 @@ impl Chain {
                 fees += total_in.saturating_sub(total_out);
             }
         }
-        let coinbase = Tx::Coinbase {
-            height,
-            extra: Vec::new(),
-            outputs: vec![Output { value: reward(parent.issued) + fees, pkh: *payee }],
-        };
+        let r = reward(parent.issued);
+        let fund = dev_fund_share(&self.net, height, r);
+        let mut outputs = vec![Output { value: r - fund + fees, pkh: *payee }];
+        if fund > 0 {
+            outputs.push(Output { value: fund, pkh: self.net.dev_fund });
+        }
+        let coinbase = Tx::Coinbase { height, extra: Vec::new(), outputs };
         let mut all = vec![coinbase];
         all.extend(txs);
         let header = Header {

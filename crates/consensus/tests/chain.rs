@@ -71,7 +71,8 @@ fn mine_and_spend() {
     let issued_before = chain.issued();
     let b = extend(&mut chain, &addr(&alice), vec![tx]);
     // coinbase collected the reward plus the 1000-atom fee
-    assert_eq!(b.txs[0].outputs()[0].value, reward(issued_before) + 1000);
+    let paid: u64 = b.txs[0].outputs().iter().map(|o| o.value).sum();
+    assert_eq!(paid, reward(issued_before) + 1000);
     assert_eq!(chain.coins_of(&addr(&bob)).iter().map(|(_, c)| c.output.value).sum::<u64>(), ATOMS_PER_RQT);
     assert!(chain.coin(&op).is_none());
 }
@@ -82,7 +83,7 @@ fn issuance_matches_the_formula() {
     let mut issued = 0u64;
     for _ in 0..6 {
         let b = extend(&mut chain, &addr(&key(1)), vec![]);
-        assert_eq!(b.txs[0].outputs()[0].value, reward(issued));
+        assert_eq!(b.txs[0].outputs().iter().map(|o| o.value).sum::<u64>(), reward(issued));
         issued += reward(issued);
         assert_eq!(chain.issued(), issued);
     }
@@ -226,4 +227,42 @@ fn epochs_change_the_weights() {
     m.extend_from_slice(&1u64.to_le_bytes());
     m.extend_from_slice(&anchor);
     assert_eq!(e1, tnet::sha256::sha256(&m));
+}
+
+#[test]
+fn development_fund_share_and_sunset() {
+    let net = Network::regtest();
+    let last = net.dev_fund_last;
+    let fund = net.dev_fund;
+    let mut chain = Chain::new(net, 1);
+    let miner = addr(&key(1));
+    // a block that pays everything to the miner is rejected while the fund is due
+    let mut b = chain.template(&miner, vec![], time_of(&chain, 1));
+    let total: u64 = b.txs[0].outputs().iter().map(|o| o.value).sum();
+    if let Tx::Coinbase { outputs, .. } = &mut b.txs[0] {
+        *outputs = vec![Output { value: total, pkh: miner }];
+    }
+    b.header.tx_root = tx_root(&b.txs);
+    let b = seal(&mut chain, b);
+    assert_eq!(chain.accept(b, NOW), Err(Error::Invalid("coinbase misses the development fund share")));
+    // templates pay 6% to the fund up to `last`, nothing after
+    let mut issued = 0u64;
+    for h in 1..=last + 3 {
+        let b = extend(&mut chain, &miner, vec![]);
+        let to_fund: u64 = b.txs[0].outputs().iter().filter(|o| o.pkh == fund).map(|o| o.value).sum();
+        let expected = if h <= last { reward(issued) * 6 / 100 } else { 0 };
+        assert_eq!(to_fund, expected, "height {h}");
+        issued += reward(issued);
+    }
+    // the fund's coins are spendable by its key after maturity
+    let dev = requant_consensus::params::regtest_dev_key();
+    let coins = chain.coins_of(&fund);
+    assert_eq!(coins.len() as u64, last);
+    let (op, coin) = coins[0];
+    let mut tx = Tx::Transfer {
+        inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
+        outputs: vec![Output { value: coin.output.value, pkh: miner }],
+    };
+    tx.sign(&chain.net.chain_id, &[&dev]);
+    extend(&mut chain, &miner, vec![tx]);
 }

@@ -15,7 +15,8 @@ decisions for the project owner, not engineering defaults.
 
 Draft rules: `CHAIN.md` (60 s blocks, ASERT, daily epochs, smooth emission with a tail, UTXO + ed25519);
 consensus core in `crates/consensus` (encoding, transactions, blocks, difficulty, emission, in-memory chain
-with reorganisation, regtest miner). Open below: funding model, genesis of the test network.
+with reorganisation, regtest miner). Funding: a 6% development fund for the first 2^21 blocks (`CHAIN.md` §8). Open below: genesis of the
+test network.
 
 
 - [ ] Block time and retarget rule; target encoding (compact or full 256-bit) (**owner** for the
@@ -23,7 +24,9 @@ with reorganisation, regtest miner). Open below: funding model, genesis of the t
 - [ ] Epoch length `E` and look-back `K` (`SPEC.md` §8); node behaviour at epoch boundaries
       (derive the next weights in the background; 512 MiB per epoch held).
 - [ ] Header layout and `header_digest`; block id; genesis.
-- [ ] Emission schedule, supply, fees (**owner**).
+- [x] Emission: smooth curve with a 0.25 RQT tail; 6% development fund for heights 1..2^21 (**owner**).
+- [ ] Before the test network starts: the owner's fund key hash and the genesis time in
+      `crates/consensus/src/params.rs` (**owner**).
 
 ## 2. Node
 

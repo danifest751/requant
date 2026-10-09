@@ -30,6 +30,18 @@ pub const MAX_FUTURE_SECS: u64 = 7200;
 pub const TEST_GENESIS_TIME: u64 = 1_791_504_000;
 pub const REGTEST_GENESIS_TIME: u64 = 1_791_504_000;
 
+/// Development fund: 6% of the block reward for heights `1..=2^21` (about four years).
+pub const DEV_FUND_PERCENT: u64 = 6;
+pub const DEV_FUND_LAST: u64 = 1 << 21;
+/// Test network fund owner: to be replaced by the owner's key hash before the test network starts. The
+/// all-zero hash has no known key, so outputs to it are unspendable (burnt), never claimable by anyone.
+pub const TEST_DEV_FUND: [u8; 32] = [0; 32];
+
+/// Publicly known regtest fund key (`[0xde; 32]`); for tests only.
+pub fn regtest_dev_key() -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[0xde; 32])
+}
+
 #[derive(Clone, Debug)]
 pub struct Network {
     pub name: &'static str,
@@ -46,6 +58,10 @@ pub struct Network {
     pub genesis_target: U256,
     pub genesis_time: u64,
     pub maturity: u64,
+    /// Owner of the development fund output (CHAIN.md §8).
+    pub dev_fund: [u8; 32],
+    /// Last height that pays the development fund.
+    pub dev_fund_last: u64,
 }
 
 impl Network {
@@ -56,6 +72,7 @@ impl Network {
         limit_bits: u32,
         time: u64,
         maturity: u64,
+        dev_fund: ([u8; 32], u64),
     ) -> Self {
         let pow_limit = U256::low_mask(limit_bits);
         Network {
@@ -70,16 +87,26 @@ impl Network {
             genesis_target: pow_limit,
             genesis_time: time,
             maturity,
+            dev_fund: dev_fund.0,
+            dev_fund_last: dev_fund.1,
         }
     }
 
     pub fn test() -> Self {
-        Self::make("test", tnet::V1, (1440, 60), 248, TEST_GENESIS_TIME, 100)
+        Self::make("test", tnet::V1, (1440, 60), 248, TEST_GENESIS_TIME, 100, (TEST_DEV_FUND, DEV_FUND_LAST))
     }
 
     pub fn regtest() -> Self {
         let p = tnet::Params { n: 256, b: 64, layers: 4, w: 64, mult: 14170 };
-        Self::make("regtest", p, (16, 4), 255, REGTEST_GENESIS_TIME, 2)
+        Self::make(
+            "regtest",
+            p,
+            (16, 4),
+            255,
+            REGTEST_GENESIS_TIME,
+            2,
+            (crate::tx::pkh(&regtest_dev_key().verifying_key().to_bytes()), 8),
+        )
     }
 
     pub fn by_name(name: &str) -> Option<Self> {

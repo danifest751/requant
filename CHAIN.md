@@ -26,6 +26,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 | `pow_limit` (largest target) | `2^240 - 1` | `2^248 - 1` | `2^255 - 1` |
 | genesis target | set at launch | `pow_limit` | `pow_limit` |
 | coinbase maturity | 100 | 100 | 2 |
+| development fund (§8) | 6%, heights 1..2^21, key set at launch | same; key set at test launch | 6%, heights 1..8, public test key |
 
 `chain_id = H("requant/chain", name)`. Regtest exists for tests and local development; its small work
 function makes CPU mining instant. The main network's genesis target is chosen at launch from the
@@ -120,6 +121,12 @@ generated(1) = 0,  generated(h + 1) = generated(h) + reward(h)
 The genesis block (height 0) issues nothing. The first reward (height 1) is 4 RQT; half of the main emission (`2^24 RQT`) is issued in about 5.5
 years at one block per minute; the tail of 0.25 RQT per block starts after about 22 years and adds about
 131,400 RQT per year from then on. Fees go to the miner in addition. No premine.
+
+**Development fund.** For heights `1 ..= 2^21` (about four years) the coinbase must pay at least
+`floor(reward(height) * 6 / 100)` to the network's fund key hash: 0.24 RQT of the first 4 RQT, about
+396,000 RQT in total (2.4% of `S`, 6% of the 6.6 million RQT issued in those four years). Fees are never
+shared. From height `2^21 + 1` the rule ends by itself. The fund is created only by mined blocks, like
+every other coin; there is no premine. Its owner publishes the fund's spending regularly.
 
 ## 9. Limits
 

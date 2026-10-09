@@ -31,6 +31,15 @@ pub const MAIN_EMISSION: u64 = (1 << 24) * ATOMS_PER_RQT;
 /// 0.25 RQT per block.
 pub const TAIL_REWARD: u64 = ATOMS_PER_RQT / 4;
 
+/// The development fund's share of a block reward (CHAIN.md §8), due at heights `1..=dev_fund_last`.
+pub fn dev_fund_share(net: &Network, height: u64, reward: u64) -> u64 {
+    if (1..=net.dev_fund_last).contains(&height) {
+        reward * crate::params::DEV_FUND_PERCENT / 100
+    } else {
+        0
+    }
+}
+
 /// Block reward given the amount issued by all earlier blocks.
 pub fn reward(generated: u64) -> u64 {
     (MAIN_EMISSION.saturating_sub(generated) >> 22).max(TAIL_REWARD)

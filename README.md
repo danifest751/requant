@@ -24,7 +24,9 @@ ticket hashed with SHA-256. A block carries the winning ticket's `(nonce, row, p
 - **Shortcuts** were tested in the research: approximate arithmetic produces no valid tickets, and
   table-based precomputation is bounded to be slower. See [`RATIONALE.md`](RATIONALE.md).
 
-Full definition: [`SPEC.md`](SPEC.md).
+Full definition: [`SPEC.md`](SPEC.md). Chain rules (draft): [`CHAIN.md`](CHAIN.md): one-minute blocks, a
+smooth emission of 2^24 RQT with a small tail, no premine, and a 6% development fund for the first four
+years that ends by itself.
 
 ## Quick start
 
