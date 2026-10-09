@@ -372,7 +372,8 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
         let id = b.id(&net);
         let reward: u64 = b.txs[0].outputs().iter().filter(|o| with_owner(&st, o)).map(|o| o.value).sum();
         let work_ratio = u256_f64(&U256::work(&b.header.target)) / u256_f64(&U256::work(&share_target));
-        if matches!(st.process_block(b.clone(), None), Ok(Some(_))) {
+        if matches!(st.process_block(b.clone(), None), Ok(Some(acc)) if acc != requant_consensus::chain::Accepted::SideChain)
+        {
             height = Some(b.header.height);
             with_pool(&mut st, |_, pool| {
                 let credits = pool.credits(reward, work_ratio);

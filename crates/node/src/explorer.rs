@@ -154,7 +154,7 @@ h1{font-size:24px;margin:4px 0 2px}h2{font-size:16px;margin:28px 0 10px;color:va
 .hero .big{font-size:40px;font-weight:800;line-height:1.1}.hero .lbl{opacity:.85;font-size:13px;text-transform:uppercase;letter-spacing:.06em}
 .hero .row{display:flex;gap:26px;flex-wrap:wrap;margin-top:10px}.hero .row b{display:block;font-size:20px}.hero .row span{opacity:.8;font-size:12px}
 .connect{background:rgba(255,255,255,.12);border-radius:12px;padding:14px}.connect p{margin:0 0 8px;font-size:13px;opacity:.9}
-code.cmd{display:block;user-select:all;cursor:copy;background:rgba(0,0,0,.28);color:#fff;border-radius:8px;padding:10px 12px;font:13px ui-monospace,Consolas,monospace;word-break:break-all}
+code.cmd{display:block;user-select:all;cursor:copy;background:rgba(0,0,0,.28);color:#fff;border-radius:8px;padding:10px 12px;font:13px ui-monospace,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 @media (max-width:760px){.hero{grid-template-columns:1fr}}
 .tbl{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto;box-shadow:var(--shadow)}
 table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -286,7 +286,7 @@ fn home(st: &crate::node::State) -> String {
     ];
     let mut body = String::from("<div class=\"cards\">");
     for (v, l) in cards {
-        body += &format!("<div class=\"card\"><b>{v}</b><span>{l}</span></div>");
+        body += &format!("<div class=\"card\"><div class=\"k\">{l}</div><div class=\"v\">{v}</div></div>");
     }
     body += "</div><h2>Latest blocks</h2><div class=\"wrap\"><table><tr><th>Height</th><th>Block</th><th>Time (UTC)</th><th>Age</th><th class=\"r\">Txs</th><th>Mined by</th></tr>";
     for h in (tip_h.saturating_sub(LATEST - 1)..=tip_h).rev() {
@@ -482,7 +482,7 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
         devices,
         blocks.len(),
         s["fee_percent"],
-        s["min_payout"].as_str().unwrap_or(""),
+        format_amount(n(&s["min_payout_atoms"])).trim_end_matches('0').trim_end_matches('.'),
         s["share_bits"],
         n(&s["maturity"]),
     );
@@ -525,7 +525,7 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
     if blocks.is_empty() {
         body += "<tr><td colspan=\"4\" class=\"empty\">No blocks yet.</td></tr>";
     }
-    for b in &blocks {
+    for b in blocks.iter().take(20) {
         body += &format!(
             "<tr><td><a href=\"/block/{0}\">{0}</a></td><td>{1} <span class=\"mut\">· {2} ago</span></td><td>{3}</td><td class=\"r\">{4}</td></tr>",
             n(&b["height"]),
