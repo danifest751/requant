@@ -27,6 +27,13 @@ pub const MAX_PEERS: usize = 32;
 /// Outbound connections the manager tries to keep.
 pub const TARGET_OUTBOUND: usize = 8;
 pub const MAX_ORPHANS: usize = 256;
+/// Orphan blocks (parent unknown) are kept up to this many bytes in total and this many per peer, and
+/// only if they are at most `MAX_ORPHAN_AHEAD` blocks above the tip.
+pub const MAX_ORPHAN_BYTES: usize = 16 << 20;
+pub const MAX_ORPHANS_PER_PEER: usize = 64;
+pub const MAX_ORPHAN_AHEAD: u64 = 4096;
+/// Inbound connections accepted from one IP address (not applied to loopback on regtest).
+pub const MAX_INBOUND_PER_IP: usize = 4;
 const MAX_TEMPLATES: usize = 16;
 /// A peer silent for this long is dropped (pings go out every `PING_EVERY`).
 const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
@@ -96,7 +103,9 @@ pub struct State {
     pub index: TxIndex,
     pub book: AddrBook,
     store: Store,
-    orphans: HashMap<Hash, Block>,
+    /// Orphans with the peer that sent them and their size.
+    orphans: HashMap<Hash, (Block, Option<u64>, usize)>,
+    orphan_bytes: usize,
     peers: HashMap<u64, Peer>,
     next_peer: u64,
     /// Work handed out by `getwork`, by header digest.
@@ -193,18 +202,16 @@ impl State {
                     }
                     self.broadcast(&Msg::Inv(vec![id]), from);
                     let children: Vec<Hash> =
-                        self.orphans.iter().filter(|(_, o)| o.header.prev == id).map(|(k, _)| *k).collect();
+                        self.orphans.iter().filter(|(_, o)| o.0.header.prev == id).map(|(k, _)| *k).collect();
                     for k in children {
-                        queue.push(self.orphans.remove(&k).unwrap());
+                        let (b, _, size) = self.orphans.remove(&k).unwrap();
+                        self.orphan_bytes -= size;
+                        queue.push(b);
                     }
                 }
                 Err(Error::Duplicate) => {}
                 Err(Error::UnknownParent) => {
-                    if self.orphans.len() >= MAX_ORPHANS {
-                        let k = *self.orphans.keys().next().unwrap();
-                        self.orphans.remove(&k);
-                    }
-                    self.orphans.insert(id, b);
+                    self.add_orphan(id, b, bytes.len(), from);
                     if let Some(p) = from {
                         self.send(p, Msg::GetBlocks(self.chain.locator()));
                     }
@@ -218,6 +225,31 @@ impl State {
             }
         }
         Ok(first)
+    }
+
+    /// Keep an orphan within the count, byte, per-peer and height limits (oldest-first eviction is not
+    /// tracked; an arbitrary orphan of the same peer, or any orphan, makes room).
+    fn add_orphan(&mut self, id: Hash, b: Block, size: usize, from: Option<u64>) {
+        if b.header.height > self.chain.height() + MAX_ORPHAN_AHEAD || size > MAX_ORPHAN_BYTES {
+            return;
+        }
+        let from_peer = |o: &(Block, Option<u64>, usize)| from.is_some() && o.1 == from;
+        while self.orphans.values().filter(|o| from_peer(o)).count() >= MAX_ORPHANS_PER_PEER {
+            let k = *self.orphans.iter().find(|(_, o)| from_peer(o)).unwrap().0;
+            self.orphan_bytes -= self.orphans.remove(&k).unwrap().2;
+        }
+        while !self.orphans.is_empty()
+            && (self.orphans.len() >= MAX_ORPHANS || self.orphan_bytes + size > MAX_ORPHAN_BYTES)
+        {
+            let k = *self.orphans.keys().next().unwrap();
+            self.orphan_bytes -= self.orphans.remove(&k).unwrap().2;
+        }
+        self.orphan_bytes += size;
+        self.orphans.insert(id, (b, from, size));
+    }
+
+    pub fn orphan_count(&self) -> (usize, usize) {
+        (self.orphans.len(), self.orphan_bytes)
     }
 
     /// Admit a transaction and relay it.
@@ -394,7 +426,9 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
     let (tx, rx) = channel::<Msg>();
     let (id, hello, magic) = {
         let mut st = shared.lock().unwrap();
-        if st.peers.len() >= MAX_PEERS || st.banned(&addr.ip()) {
+        let same_ip = st.peers.values().filter(|p| !p.outbound && p.addr.ip() == addr.ip()).count();
+        let per_ip_full = !outbound && same_ip >= MAX_INBOUND_PER_IP && !(st.allow_local && addr.ip().is_loopback());
+        if st.peers.len() >= MAX_PEERS || st.banned(&addr.ip()) || per_ip_full {
             let _ = stream.shutdown(std::net::Shutdown::Both);
             return Ok(());
         }
@@ -484,6 +518,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         book: AddrBook::load(Some(dir.join("peers.txt")), allow_local),
         store,
         orphans: HashMap::new(),
+        orphan_bytes: 0,
         peers: HashMap::new(),
         next_peer: 0,
         templates: Vec::new(),

@@ -216,3 +216,26 @@ fn discovery_history_and_unconfirmed_change() {
     assert!(sent > 0);
     a.stop.store(true, Ordering::Relaxed);
 }
+
+#[test]
+fn orphan_pool_is_bounded() {
+    let dir = datadir("orph");
+    let n = node(&dir, vec![], None);
+    let mut st = n.shared.lock().unwrap();
+    let tip = st.chain.tip();
+    for k in 0..100u64 {
+        let mut b = st.chain.template_on(&tip, &[1; 32], vec![], 0);
+        b.header.prev = [k as u8 + 1; 32]; // unknown parents
+        b.header.prev[31] = (k >> 8) as u8;
+        let _ = st.process_block(b, Some(7));
+    }
+    let (count, bytes) = st.orphan_count();
+    assert_eq!(count, requant_node::node::MAX_ORPHANS_PER_PEER);
+    assert!(bytes <= requant_node::node::MAX_ORPHAN_BYTES);
+    // far-future orphans are not kept at all
+    let mut far = st.chain.template_on(&tip, &[1; 32], vec![], 0);
+    far.header.prev = [0xee; 32];
+    far.header.height = 1_000_000;
+    let _ = st.process_block(far, Some(8));
+    assert_eq!(st.orphan_count().0, count);
+}

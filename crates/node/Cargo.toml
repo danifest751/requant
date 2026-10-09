@@ -1,6 +1,6 @@
 [package]
 name = "requant-node"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "Apache-2.0"
 description = "Requant full node: storage, peer-to-peer sync and relay, mempool, JSON-RPC, regtest CPU miner."

@@ -47,6 +47,8 @@ test network.
       transactions in the pool, reorged transactions returned to the pool, optional RPC token.
 - [x] Read-only block explorer in the node (`--explorer ADDR`): summary, latest blocks, block, transaction
       and address pages, search.
+- [x] Resource bounds for public nodes: orphan blocks limited by bytes (16 MiB), per peer (64) and height
+      (4096 above the tip); four inbound connections per IP; explorer serves 32 requests at once.
 - [ ] Headers-first sync; persistent ban list.
 - [x] Deep-fork protection: forks more than `--max-reorg` blocks below the tip (default one epoch) are
       refused before their work is checked (node policy; recovery after a longer partition is manual).

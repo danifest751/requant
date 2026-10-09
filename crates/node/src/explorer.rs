@@ -12,16 +12,25 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 const LATEST: u64 = 25;
+/// Requests served at once; more are refused.
+const MAX_ACTIVE: usize = 32;
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 const HASHRATE_WINDOW: u64 = 60;
 
 pub fn serve(shared: Shared, addr: SocketAddr) -> io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
     std::thread::spawn(move || {
+        use std::sync::atomic::Ordering::SeqCst;
         for s in listener.incoming().flatten() {
+            if ACTIVE.fetch_add(1, SeqCst) >= MAX_ACTIVE {
+                ACTIVE.fetch_sub(1, SeqCst);
+                continue; // dropping the stream closes it
+            }
             let shared = shared.clone();
             std::thread::spawn(move || {
                 let _ = handle(&shared, s);
+                ACTIVE.fetch_sub(1, SeqCst);
             });
         }
     });
