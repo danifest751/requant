@@ -33,3 +33,6 @@ desktop.ini
 
 # local review archives
 *.zip
+
+# wallet keys (never commit)
+*.key
