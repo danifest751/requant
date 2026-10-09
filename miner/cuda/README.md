@@ -1,5 +1,9 @@
 # GPU attempt benchmark (TNet v1)
 
+The miner is CPPminer `--algo tnet` (branch `feat/tnet-backend` of
+[danifest751/CPPminer](https://github.com/danifest751/CPPminer/tree/feat/tnet-backend), `docs/tnet.md`
+there); this benchmark is its measurement and parity tool.
+
 `tnet_bench.cu` runs complete TNet attempts on one GPU with cuBLAS int8 GEMM (tensor cores), an
 integer requantization kernel and SHA-256 ticket hashing, and reports per-phase times, the tensor-core
 share, activation statistics, ticket counts and one sample ticket. The sample is checked with

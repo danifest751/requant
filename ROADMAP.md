@@ -51,10 +51,12 @@ test network.
 
 ## 3. Miner
 
-- [ ] Turn `miner/cuda/tnet_bench.cu` into a miner: work from the node or a pool, row sub-batches of
-      `B`, ticket submission.
+- [x] GPU miner: CPPminer `--algo tnet` (branch `feat/tnet-backend` of
+      [danifest751/CPPminer](https://github.com/danifest751/CPPminer/tree/feat/tnet-backend)): solo mining
+      through `getwork`/`submitwork`, row batches (`--batch`, any size works on small GPUs), self-test.
+      Mined 20 regtest blocks and 15 blocks at the TNet v1 parameters into `requantd` (CMP 50HX).
+- [ ] Merge into CPPminer's release builds; Windows build; several GPUs in one process.
 - [ ] Optional fused requantization in the GEMM epilogue, bit-exact with `SPEC.md` §5.
-- [ ] Multi-GPU, memory-limited GPUs (rows are independent; any batch size is valid).
 - [ ] Pool protocol (share = ticket at a lower target).
 
 ## 4. Network launch
