@@ -119,6 +119,20 @@ fn utc(t: u64) -> String {
     format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
 }
 
+/// Text from outside (a peer's software name) made safe inside HTML.
+fn esc(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '&' => "&amp;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
+}
+
 fn ago(t: u64) -> String {
     let d = now().saturating_sub(t);
     match d {
@@ -185,10 +199,11 @@ fn page(title: &str, body: &str, refresh: bool) -> String {
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">{meta}\
 <title>{title} · Requant</title><style>{STYLE}</style></head><body>\
 <div class=\"top\"><div class=\"in\"><a class=\"brand\" href=\"/\"><span class=\"logo\">R</span>Requant</a><span class=\"tag\">testnet</span>\
-<nav><a href=\"/\"{}>Explorer</a><a href=\"/pool\"{}>Pool</a></nav>\
+<nav><a href=\"/\"{}>Explorer</a><a href=\"/network\"{}>Network</a><a href=\"/pool\"{}>Pool</a></nav>\
 <form action=\"/search\"><input name=\"q\" placeholder=\"Search block height, block id, txid or address\" aria-label=\"Search\"></form></div></div>\
 <main>{body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/danifest751/requant\">source</a></footer></main></body></html>",
         on("Requant test network"),
+        on("Network"),
         on("Mining pool")
     )
 }
@@ -223,6 +238,7 @@ fn route(shared: &Shared, path: &str, host: &str) -> (&'static str, String) {
             Ok(owner) => ("200 OK", address_page(&st, &owner)),
             Err(_) => not_found("Address"),
         },
+        ["", "network"] => ("200 OK", network_page(&st)),
         ["", "pool"] => match crate::pool::stats(&st) {
             Some(s) => ("200 OK", pool_page(&s, host)),
             None => not_found("Pool (this node runs none)"),
@@ -307,6 +323,75 @@ fn home(st: &crate::node::State) -> String {
     }
     body += "</table></div>";
     page("Requant test network", &body, true)
+}
+
+/// This node's view of the network: its peers (software and height, not their addresses) and the
+/// transactions waiting for a block.
+fn network_page(st: &crate::node::State) -> String {
+    let peers = st.peers();
+    let outbound = peers.iter().filter(|p| p.outbound).count();
+    let name = |a: &str| if a.is_empty() { "(greeting pending)".to_string() } else { esc(a) };
+    let mut versions: Vec<(String, usize)> = Vec::new();
+    for p in &peers {
+        let a = name(&p.agent);
+        match versions.iter_mut().find(|(v, _)| *v == a) {
+            Some(e) => e.1 += 1,
+            None => versions.push((a, 1)),
+        }
+    }
+    versions.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    let cards = [
+        (format!("{}", peers.len()), format!("peers ({outbound} outbound, {} inbound)", peers.len() - outbound)),
+        (format!("{}", st.chain.height()), "block height".to_string()),
+        (format!("{}", st.headers.height()), "verified headers".to_string()),
+        (format!("{}", st.mempool.len()), format!("unconfirmed transactions ({} bytes)", st.mempool.bytes())),
+        (crate::node::agent(), format!("this node, up {}", ago(st.started))),
+    ];
+    let mut body = String::from(
+        "<h1>Network</h1><p class=\"sub\">As seen by this node. Peer addresses are not shown.</p><div class=\"cards\">",
+    );
+    for (v, l) in cards {
+        body += &format!("<div class=\"card\"><div class=\"k\">{l}</div><div class=\"v\">{v}</div></div>");
+    }
+    body += "</div><h2>Software of the peers</h2><div class=\"tbl\"><table><thead><tr><th>Version</th><th class=\"r\">Peers</th></tr></thead><tbody>";
+    if versions.is_empty() {
+        body += "<tr><td colspan=\"2\" class=\"empty\">No peers connected.</td></tr>";
+    }
+    for (v, n) in &versions {
+        body += &format!("<tr><td class=\"mono\">{v}</td><td class=\"r\">{n}</td></tr>");
+    }
+    body += "</tbody></table></div><h2>Peers</h2><div class=\"tbl\"><table><thead><tr><th>Direction</th><th>Software</th><th class=\"r\">Height</th><th>Connected for</th></tr></thead><tbody>";
+    let tip = st.chain.height();
+    for p in &peers {
+        let behind = if p.height + 2 < tip {
+            format!(" <span class=\"mut\">({} behind)</span>", tip - p.height)
+        } else {
+            String::new()
+        };
+        body += &format!(
+            "<tr><td>{}</td><td class=\"mono\">{}</td><td class=\"r\">{}{behind}</td><td class=\"mut\">{}</td></tr>",
+            if p.outbound { "outbound" } else { "inbound" },
+            name(&p.agent),
+            p.height,
+            ago(p.since)
+        );
+    }
+    body += "</tbody></table></div><h2>Unconfirmed transactions</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th class=\"r\">Size (bytes)</th><th class=\"r\">Fee (RQT)</th><th class=\"r\">Fee per byte (atoms)</th></tr></thead><tbody>";
+    let txs = st.mempool.list();
+    if txs.is_empty() {
+        body += "<tr><td colspan=\"4\" class=\"empty\">None: every known transaction is in a block.</td></tr>";
+    }
+    for (id, fee, size) in txs.iter().take(100) {
+        let t = hex(id);
+        body += &format!(
+            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td class=\"r\">{size}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
+            short(&t),
+            format_amount(*fee),
+            fee / (*size).max(1) as u64
+        );
+    }
+    body += "</tbody></table></div>";
+    page("Network", &body, true)
 }
 
 fn block_page(st: &crate::node::State, id: &Hash) -> String {

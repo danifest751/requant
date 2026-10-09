@@ -155,6 +155,7 @@ pub struct State {
     pub node_id: u64,
     listen_port: u16,
     bans: HashMap<IpAddr, u64>,
+    bans_path: PathBuf,
     allow_local: bool,
     pub started: u64,
     pub pool: Option<crate::pool::Pool>,
@@ -215,7 +216,14 @@ impl State {
 
     fn ban(&mut self, ip: IpAddr) {
         if !ip.is_loopback() {
-            self.bans.insert(ip, now() + BAN_SECS);
+            let t = now();
+            self.bans.insert(ip, t + BAN_SECS);
+            self.bans.retain(|_, until| *until > t);
+            // kept across restarts: "ip until" per line
+            let text: String = self.bans.iter().map(|(ip, until)| format!("{ip} {until}\n")).collect();
+            if let Err(e) = std::fs::write(&self.bans_path, text) {
+                eprintln!("bans: {e}");
+            }
         }
     }
 
@@ -734,6 +742,20 @@ pub fn connect(shared: &Shared, addr: &str) -> io::Result<()> {
     spawn_peer(shared.clone(), stream, true)
 }
 
+/// Bans still in force from `bans.txt` ("ip until" per line; a missing or bad file means none).
+fn load_bans(path: &std::path::Path) -> HashMap<IpAddr, u64> {
+    let t = now();
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|l| {
+            let (ip, until) = l.split_once(' ')?;
+            Some((ip.parse().ok()?, until.trim().parse().ok()?))
+        })
+        .filter(|(_, until)| *until > t)
+        .collect()
+}
+
 /// Open storage, replay it, and start listening, connecting, RPC and mining as configured.
 pub fn start(cfg: Config) -> io::Result<Handle> {
     let dir = cfg.datadir.join(cfg.net.name);
@@ -779,7 +801,8 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         templates: Vec::new(),
         node_id: random_u64(),
         listen_port: p2p.port(),
-        bans: HashMap::new(),
+        bans: load_bans(&dir.join("bans.txt")),
+        bans_path: dir.join("bans.txt"),
         allow_local,
         started: now(),
         pool: cfg.pool.clone().map(|p| crate::pool::Pool::new(p, dir.join("pool.json"))),

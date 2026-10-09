@@ -59,6 +59,13 @@ impl Mempool {
         self.bytes
     }
 
+    /// Pooled transactions, newest first: (txid, fee, size in bytes).
+    pub fn list(&self) -> Vec<(Hash, u64, usize)> {
+        let mut v: Vec<_> = self.txs.iter().map(|(id, e)| (e.seq, *id, e.fee, e.size)).collect();
+        v.sort_unstable_by_key(|x| std::cmp::Reverse(x.0));
+        v.into_iter().map(|(_, id, fee, size)| (id, fee, size)).collect()
+    }
+
     /// An output spendable by a pool transaction: from the UTXO set (with its maturity) or created by a
     /// pooled transaction. Returns the output and the pooled parent, if any.
     fn coin(&self, chain: &Chain, op: &OutPoint) -> Result<(Output, Option<Hash>), Error> {
