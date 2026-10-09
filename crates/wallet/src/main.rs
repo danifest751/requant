@@ -1,6 +1,7 @@
 //! `requant-wallet`: keys, addresses, balance and payments through a node's JSON-RPC.
 //!
-//! requant-wallet keygen  KEYFILE                       [--network N]
+//! requant-wallet keygen  KEYFILE [--no-passphrase]     [--network N]
+//! requant-wallet encrypt KEYFILE                       (encrypt, or change the passphrase)
 //! requant-wallet address KEYFILE                       [--network N]
 //! requant-wallet balance ADDRESS                       [--network N] [--rpc HOST:PORT]
 //! requant-wallet history ADDRESS [N]                   [--network N] [--rpc HOST:PORT]
@@ -19,13 +20,35 @@ fn die(msg: &str) -> ! {
     std::process::exit(1)
 }
 
+/// Passphrase from `REQUANT_WALLET_PASSPHRASE`, else asked on the terminal (twice when `confirm`).
+fn passphrase(prompt: &str, confirm: bool) -> String {
+    if let Ok(p) = std::env::var("REQUANT_WALLET_PASSPHRASE") {
+        return p;
+    }
+    let p = rpassword::prompt_password(prompt).unwrap_or_else(|e| die(&format!("passphrase: {e}")));
+    if confirm && rpassword::prompt_password("repeat it: ").unwrap_or_default() != p {
+        die("the passphrases differ");
+    }
+    p
+}
+
+fn random<const N: usize>() -> [u8; N] {
+    let mut b = [0u8; N];
+    getrandom::getrandom(&mut b).unwrap_or_else(|e| die(&format!("random: {e}")));
+    b
+}
+
+/// Write a key file atomically (temporary file, then rename).
+fn write_key(path: &str, text: &str) {
+    let tmp = format!("{path}.tmp");
+    std::fs::write(&tmp, format!("{text}\n")).unwrap_or_else(|e| die(&format!("{tmp}: {e}")));
+    std::fs::rename(&tmp, path).unwrap_or_else(|e| die(&format!("{path}: {e}")));
+}
+
 fn load_key(path: &str) -> SigningKey {
     let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{path}: {e}")));
-    let bytes: [u8; 32] = unhex(text.trim())
-        .ok()
-        .and_then(|v| v.try_into().ok())
-        .unwrap_or_else(|| die("key file must hold 64 hex digits"));
-    SigningKey::from_bytes(&bytes)
+    let pass = is_encrypted(&text).then(|| passphrase(&format!("passphrase for {path}: "), false));
+    SigningKey::from_bytes(&decrypt_key(&text, pass.as_deref()).unwrap_or_else(|e| die(e)))
 }
 
 /// `(coin, spendable now, confirmed)`.
@@ -48,6 +71,7 @@ fn coins(rpc: SocketAddr, owner: &[u8; 32]) -> Vec<(Spendable, bool, bool)> {
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let plain = args.iter().position(|a| a == "--no-passphrase").map(|k| args.remove(k)).is_some();
     let mut opt = |name: &str| -> Option<String> {
         let k = args.iter().position(|a| a == name)?;
         let v = args.get(k + 1).cloned().unwrap_or_else(|| die(&format!("{name} needs a value")));
@@ -65,13 +89,31 @@ fn main() {
             if std::path::Path::new(path).exists() {
                 die(&format!("{path} exists; refusing to overwrite a key"));
             }
-            let mut secret = [0u8; 32];
-            getrandom::getrandom(&mut secret).unwrap_or_else(|e| die(&format!("random: {e}")));
-            std::fs::write(path, hex(&secret) + "\n").unwrap_or_else(|e| die(&format!("{path}: {e}")));
+            let secret: [u8; 32] = random();
+            if plain {
+                write_key(path, &hex(&secret));
+                println!("unencrypted key written to {path} (back it up; anyone with this file can spend its coins)");
+            } else {
+                let pass = passphrase("new passphrase: ", true);
+                if pass.is_empty() {
+                    die("empty passphrase; use --no-passphrase for an unencrypted key file");
+                }
+                write_key(path, &encrypt_key(&secret, &pass, &random(), &random()).unwrap_or_else(|e| die(e)));
+                println!("encrypted key written to {path} (back it up and remember the passphrase: both are needed)");
+            }
             let key = SigningKey::from_bytes(&secret);
-            println!("key written to {path} (back it up; anyone with this file can spend its coins)");
             println!("address  {}", address(&net, &owner_of(&key)));
             println!("key hash {}", hex(&owner_of(&key)));
+        }
+        ["encrypt", path] => {
+            // encrypt an unencrypted key file, or change the passphrase of an encrypted one
+            let key = load_key(path);
+            let pass = passphrase("new passphrase: ", true);
+            if pass.is_empty() {
+                die("empty passphrase");
+            }
+            write_key(path, &encrypt_key(&key.to_bytes(), &pass, &random(), &random()).unwrap_or_else(|e| die(e)));
+            println!("{path} is now encrypted ({})", address(&net, &owner_of(&key)));
         }
         ["address", path] => {
             let key = load_key(path);
@@ -148,7 +190,7 @@ fn main() {
             println!("sent {} RQT, fee {} atoms, txid {}", format_amount(amount), fee, txid.as_str().unwrap_or(""));
         }
         _ => die(concat!(
-            "usage: requant-wallet keygen KEYFILE | address KEYFILE | balance ADDRESS | history ADDRESS [N] | tx TXID",
+            "usage: requant-wallet keygen KEYFILE [--no-passphrase] | encrypt KEYFILE | address KEYFILE | balance ADDRESS | history ADDRESS [N] | tx TXID",
             " | send KEYFILE ADDRESS AMOUNT [--fee ATOMS] [--network test|regtest] [--rpc HOST:PORT]"
         )),
     }

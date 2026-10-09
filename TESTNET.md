@@ -27,7 +27,8 @@ a laptop or VPS CPU. JSON-RPC listens on `127.0.0.1:19334` only.
 ## Wallet
 
 ```sh
-target/release/requant-wallet keygen my.key --network test        # address trq1... and key hash
+target/release/requant-wallet keygen my.key --network test        # asks a passphrase; prints address and key hash
+target/release/requant-wallet encrypt old.key --network test       # encrypt an older unencrypted key file
 target/release/requant-wallet balance <address> --network test
 target/release/requant-wallet history <address> --network test
 target/release/requant-wallet tx <txid> --network test

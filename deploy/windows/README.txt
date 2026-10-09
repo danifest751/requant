@@ -27,6 +27,7 @@ Requant — тестовая сеть: майнер для Windows
 Настройки (config.bat)
 - PAYEE / ADDRESS — куда идут награды. Свой кошелёк:
     requant-wallet.exe keygen my.key --network test
+  (спросит пароль: файл ключа будет зашифрован; нужны и файл, и пароль)
   затем впишите "key hash" в PAYEE и "address" в ADDRESS. Файл my.key храните в секрете.
 - DEVICE — номер видеокарты (0, 1, ...). Для нескольких карт скопируйте start-miner.bat
   и задайте в копии свой DEVICE.
