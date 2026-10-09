@@ -61,25 +61,31 @@ The fee follows the transaction's size: `--fee-rate` atoms per byte (default 5, 
 transaction takes at most 600 inputs; with more coins, `send ... all` and `consolidate` handle the first
 600, so run them again. `--yes` skips the question (scripts).
 
+## Get the miner
+
+The GPU miner is **CPPminer** (`--algo tnet`, NVIDIA GPUs from Turing / RTX 20xx on), released at
+[danifest751/CPPminer](https://github.com/danifest751/CPPminer/releases/tag/v0.5-fork.9): `cppminer-win64-cuda.zip` for Windows, `cppminer-linux-x64-cuda.tar.gz`
+for Linux. Nothing else is needed besides a current NVIDIA driver; check the GPU with
+`cppminer --algo tnet --selftest`. Source and build notes: `docs/tnet.md` in that repository.
+
 ## Mine in the pool (no node needed)
 
 ```sh
-cppminer --algo tnet --rpc 193.187.93.29:19340 --payee <key hash from requant-wallet>
+cppminer --algo tnet --rpc 193.187.93.29:19340 --payee <key hash from requant-wallet> --worker rig1
 ```
 
-Shares are credited PPLNS, rewards after 100 confirmations, paid automatically from 1 RQT.
+`--worker` names the device in the pool's statistics (several devices can share one address). Shares are
+credited PPLNS, rewards after 100 confirmations, paid automatically from 1 RQT.
 
 ## Mine solo (NVIDIA GPU)
 
-Build CPPminer from the `feat/tnet-backend` branch of
-[danifest751/CPPminer](https://github.com/danifest751/CPPminer/tree/feat/tnet-backend) with CUDA and cuBLAS
-(`docs/tnet.md` there), run a node as above, then:
+Run a node as above, then:
 
 ```sh
 cppminer --algo tnet --rpc 127.0.0.1:19334 --payee <key hash from requant-wallet>
 ```
 
-A CMP 50HX (Turing) does about 3.5 M tickets/s; an RTX 3090 about 6.3 M.
+A CMP 50HX (Turing) does about 3.6 M tickets/s, an RTX 5070 about 5 M, an RTX 3090 about 6.3 M.
 
 ## Known limits of this version
 

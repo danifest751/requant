@@ -689,8 +689,9 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
         "<div class=\"hero\"><div><div class=\"lbl\">Pool rate · last 10 min</div><div class=\"big\">{}tickets/s</div>\
 <div class=\"row\"><div><b>{}</b><span>addresses</span></div><div><b>{}</b><span>devices</span></div>\
 <div><b>{}</b><span>blocks found</span></div><div><b>{} %</b><span>fee</span></div><div><b>{} RQT</b><span>min payout</span></div></div></div>\
-<div class=\"connect\"><p>Connect a GPU (CPPminer, <span style=\"opacity:.8\">--worker names a device</span>):</p>\
+<div class=\"connect\"><p>Connect a GPU (<a style=\"color:#fff;text-decoration:underline\" href=\"https://github.com/danifest751/CPPminer/releases/latest\">download CPPminer</a>, NVIDIA from RTX 20xx; <span style=\"opacity:.8\">--worker names a device</span>):</p>\
 <code class=\"cmd\">cppminer --algo tnet --rpc {endpoint} --payee YOUR_KEY_HASH --worker rig1</code>\
+<p style=\"margin-top:8px;font-size:13px;opacity:.9\">No key hash yet? <code>requant-wallet keygen my.key</code> prints it, or take test coins from the <a style=\"color:#fff;text-decoration:underline\" href=\"/faucet\">faucet</a>.</p>\
 <p style=\"margin-top:10px\">PPLNS over the last shares · 2^{} tickets per share · paid automatically after {} confirmations, every 10 min</p></div></div>",
         si(f(&s["tickets_per_s"])),
         miners.len(),

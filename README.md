@@ -41,8 +41,8 @@ cargo test --release -- --ignored            # frozen-parameter vectors (512 MiB
 cargo run --release --bin tnet -- bench      # CPU verification time at the v1 parameters
 ```
 
-GPU miner: CPPminer `--algo tnet` ([branch `feat/tnet-backend`](https://github.com/danifest751/CPPminer/tree/feat/tnet-backend)),
-mining through the node's `getwork`/`submitwork`. GPU benchmark and parity tool: [`miner/cuda/`](miner/cuda/README.md).
+GPU miner: **CPPminer** `--algo tnet` — download it from [its releases](https://github.com/danifest751/CPPminer/releases/tag/v0.5-fork.9) (Windows and Linux,
+NVIDIA GPUs from Turing on); it mines in the pool or through a node's `getwork`/`submitwork`. GPU benchmark and parity tool: [`miner/cuda/`](miner/cuda/README.md).
 
 A local regtest node that mines on the CPU (instant blocks, small work function):
 
