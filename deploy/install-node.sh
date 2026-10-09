@@ -13,8 +13,7 @@ EXTRA=""
 # with POOL_ARGS for --pool-fee, --pool-share-bits, --pool-min-payout
 if [ -n "$POOL_PORT" ]; then
   if [ ! -f /var/lib/requant/pool.key ]; then
-    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' 
-' > /var/lib/requant/pool.key
+    head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /var/lib/requant/pool.key
   fi
   chown requant:requant /var/lib/requant/pool.key 2>/dev/null || true
   chmod 600 /var/lib/requant/pool.key
