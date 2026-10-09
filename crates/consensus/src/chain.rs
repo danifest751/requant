@@ -59,6 +59,8 @@ pub struct Chain {
     epochs: Vec<(Hash, Arc<tnet::Epoch>)>,
     /// Reason the last block marked invalid failed to connect.
     last_failure: &'static str,
+    /// Blocks taken off the best chain by the last reorganisation (for returning their transactions to a pool).
+    disconnected: Vec<Arc<Block>>,
     /// Node policy: refuse blocks forking more than this many blocks below the tip (no limit by default).
     max_reorg: u64,
 }
@@ -87,6 +89,7 @@ impl Chain {
             undo: HashMap::new(),
             epochs: Vec::new(),
             last_failure: "",
+            disconnected: Vec::new(),
             max_reorg: u64::MAX,
         };
         c.entries.insert(id, entry);
@@ -180,6 +183,11 @@ impl Chain {
         }
         let total_out: u64 = outputs.iter().map(|o| o.value).sum();
         total_in.checked_sub(total_out).ok_or(Error::Invalid("outputs exceed inputs"))
+    }
+
+    /// Blocks disconnected by the last reorganisation, handed over once.
+    pub fn take_disconnected(&mut self) -> Vec<Arc<Block>> {
+        std::mem::take(&mut self.disconnected)
     }
 
     /// Height of a known block.
@@ -451,6 +459,7 @@ impl Chain {
                 return Err((*b, reason));
             }
         }
+        self.disconnected = old.iter().map(|id| self.entries[id].block.clone()).collect();
         Ok(old.len())
     }
 
@@ -556,8 +565,6 @@ impl Chain {
 
     /// As [`Chain::template`] on any known `parent` (fees are computed against the tip's UTXO set).
     pub fn template_on(&self, parent_id: &Hash, payee: &Hash, txs: Vec<Tx>, time: u64) -> Block {
-        let parent = &self.entries[parent_id];
-        let height = parent.height + 1;
         let mut fees = 0u64;
         for tx in &txs {
             if let Tx::Transfer { inputs, outputs } = tx {
@@ -566,6 +573,14 @@ impl Chain {
                 fees += total_in.saturating_sub(total_out);
             }
         }
+        self.template_with_fees(parent_id, payee, txs, fees, time)
+    }
+
+    /// As [`Chain::template_on`] with the transactions' total fee given by the caller (a pool that also
+    /// knows inputs created by earlier transactions of the same block).
+    pub fn template_with_fees(&self, parent_id: &Hash, payee: &Hash, txs: Vec<Tx>, fees: u64, time: u64) -> Block {
+        let parent = &self.entries[parent_id];
+        let height = parent.height + 1;
         let r = reward(parent.issued);
         let fund = dev_fund_share(&self.net, height, r);
         let mut outputs = vec![Output { value: r - fund + fees, pkh: *payee }];

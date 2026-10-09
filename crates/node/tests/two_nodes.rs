@@ -31,6 +31,9 @@ fn node(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>) -> Handle {
         mine_interval: Duration::from_millis(30),
         threads: 1,
         max_reorg: 100,
+        rpc_token: None,
+        peer_interval: Duration::from_millis(300),
+        discover: true,
     })
     .unwrap()
 }
@@ -89,7 +92,12 @@ fn sync_relay_mine_and_restart() {
 
     let bob_hex = hex(&addr(&bob));
     wait("the payment to be mined and seen by b", 60, || {
-        request(rpc_b, "utxos", json!([bob_hex])).unwrap().as_array().unwrap().iter().any(|c| c["value"] == 12_345)
+        request(rpc_b, "utxos", json!([bob_hex]))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["value"] == 12_345 && c["confirmed"] == true)
     });
     assert_eq!(b.shared.lock().unwrap().mempool.len(), 0);
 
@@ -140,4 +148,70 @@ fn getwork_submitwork_roundtrip() {
     let work = request(rpc, "getwork", json!([hex(&addr(&miner))])).unwrap();
     let res = request(rpc, "submitwork", json!([work["header_digest"], 0, 0, 0, "00".repeat(64)])).unwrap();
     assert_eq!(res["accepted"], false);
+}
+
+#[test]
+fn discovery_history_and_unconfirmed_change() {
+    let (alice, bob) = (SigningKey::from_bytes(&[4; 32]), SigningKey::from_bytes(&[5; 32]));
+    let (da, db, dc) = (datadir("da"), datadir("db"), datadir("dc"));
+    let a = node(&da, vec![], Some(addr(&alice)));
+    wait("a to mine", 60, || height(&a) >= 4);
+    let b = node(&db, vec![a.p2p.to_string()], None);
+    // c only knows b
+    let c = node(&dc, vec![b.p2p.to_string()], None);
+    let a_addr = a.p2p;
+    // a and c never were told about each other; gossip through b connects them (either may dial)
+    wait("a and c to find each other", 60, || {
+        c.shared.lock().unwrap().peers().iter().any(|p| p.listen == Some(a_addr))
+    });
+    wait("c to sync", 60, || height(&c) >= 4);
+    let info = request(c.rpc.unwrap(), "getinfo", json!([])).unwrap();
+    assert_eq!(info["version"], env!("CARGO_PKG_VERSION"));
+    assert!(info["known_addresses"].as_u64().unwrap() >= 2);
+
+    // two payments in a row: the second spends the first one's unconfirmed change
+    let rpc = c.rpc.unwrap();
+    let net = Network::regtest();
+    let pay = |to: Hash, value: u64| {
+        let coins = request(rpc, "utxos", json!([hex(&addr(&alice))])).unwrap();
+        let coin = coins
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["spendable"].as_bool().unwrap())
+            .max_by_key(|c| (c["confirmed"] == false, c["value"].as_u64().unwrap()))
+            .unwrap()
+            .clone();
+        let op = OutPoint {
+            txid: unhex(coin["txid"].as_str().unwrap()).unwrap().try_into().unwrap(),
+            vout: coin["vout"].as_u64().unwrap() as u32,
+        };
+        let v = coin["value"].as_u64().unwrap();
+        let mut tx = Tx::Transfer {
+            inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
+            outputs: vec![Output { value, pkh: to }, Output { value: v - value - 300, pkh: addr(&alice) }],
+        };
+        tx.sign(&net.chain_id, &[&alice]);
+        request(rpc, "sendtx", json!([hex(&tx.encode())])).map(|_| tx)
+    };
+    let t1 = pay(addr(&bob), 1_000).unwrap();
+    let t2 = pay(addr(&bob), 2_000).expect("spending unconfirmed change");
+    assert_eq!(c.shared.lock().unwrap().mempool.len(), 2);
+    let pending = request(rpc, "history", json!([hex(&addr(&bob))])).unwrap();
+    assert_eq!(pending.as_array().unwrap().len(), 2);
+    assert!(pending.as_array().unwrap().iter().all(|e| e["confirmations"] == 0));
+
+    // both get mined (parent before child) and show up in history and gettx
+    wait("both payments confirmed", 60, || {
+        let h = request(rpc, "history", json!([hex(&addr(&bob))])).unwrap();
+        h.as_array().unwrap().iter().filter(|e| e["confirmations"].as_u64().unwrap_or(0) >= 1).count() == 2
+    });
+    let tx2 = request(rpc, "gettx", json!([hex(&t2.txid())])).unwrap();
+    assert_eq!(tx2["fee"], 300);
+    assert_eq!(tx2["inputs"][0]["txid"], hex(&t1.txid()));
+    assert_eq!(tx2["outputs"][0]["value"], 2_000);
+    let hist = request(rpc, "history", json!([hex(&addr(&alice)), 1000])).unwrap();
+    let sent: u64 = hist.as_array().unwrap().iter().map(|e| e["sent"].as_u64().unwrap()).sum();
+    assert!(sent > 0);
+    a.stop.store(true, Ordering::Relaxed);
 }

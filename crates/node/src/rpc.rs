@@ -1,7 +1,8 @@
-//! JSON-RPC over HTTP on a local address: `POST /` with `{"method": ..., "params": [...]}`, answered by
-//! `{"result": ..., "error": null}`. No authentication: bind it to localhost only.
+//! JSON-RPC over HTTP: `POST /` with `{"method": ..., "params": [...]}`, answered by
+//! `{"result": ..., "error": null}`. Bind it to localhost; with a token configured, requests must carry
+//! `Authorization: Bearer <token>` (clients here read it from `REQUANT_RPC_TOKEN`).
 
-use crate::node::Shared;
+use crate::node::{agent, now, Shared, VERSION};
 use requant_consensus::block::Claim;
 use requant_consensus::tx::{Hash, Tx};
 use serde_json::{json, Value};
@@ -29,23 +30,29 @@ fn u64_param(v: &Value) -> Result<u64, String> {
     v.as_u64().ok_or_else(|| "expected an integer".to_string())
 }
 
-pub fn serve(shared: Shared, addr: SocketAddr) -> io::Result<SocketAddr> {
+pub fn serve(shared: Shared, addr: SocketAddr, token: Option<String>) -> io::Result<SocketAddr> {
     let listener = TcpListener::bind(addr)?;
     let local = listener.local_addr()?;
     std::thread::spawn(move || {
         for s in listener.incoming().flatten() {
-            let shared = shared.clone();
+            let (shared, token) = (shared.clone(), token.clone());
             std::thread::spawn(move || {
-                let _ = handle(shared, s);
+                let _ = handle(shared, s, token);
             });
         }
     });
     Ok(local)
 }
 
-fn handle(shared: Shared, stream: TcpStream) -> io::Result<()> {
+/// Constant-time comparison for the token.
+fn same(a: &str, b: &str) -> bool {
+    a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+fn handle(shared: Shared, stream: TcpStream, token: Option<String>) -> io::Result<()> {
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
-    let mut len = 0usize;
+    let (mut len, mut auth) = (0usize, None::<String>);
     let mut line = String::new();
     loop {
         line.clear();
@@ -56,8 +63,17 @@ fn handle(shared: Shared, stream: TcpStream) -> io::Result<()> {
         if l.is_empty() {
             break;
         }
-        if let Some(v) = l.to_ascii_lowercase().strip_prefix("content-length:") {
+        let lower = l.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("content-length:") {
             len = v.trim().parse().unwrap_or(0);
+        }
+        if lower.starts_with("authorization:") {
+            auth = l["authorization:".len()..].trim().strip_prefix("Bearer ").map(|s| s.trim().to_string());
+        }
+    }
+    if let Some(t) = &token {
+        if !auth.as_deref().is_some_and(|a| same(a, t)) {
+            return respond(stream, &json!({"result": null, "error": "unauthorized"}));
         }
     }
     if len > MAX_BODY {
@@ -93,19 +109,88 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
     let arg = |k: usize| p.get(k).ok_or_else(|| format!("missing parameter {k}"));
     let mut st = shared.lock().unwrap();
     match method {
-        "getinfo" => Ok(json!({
-            "network": st.chain.net.name,
-            "height": st.chain.height(),
-            "tip": hex(&st.chain.tip()),
-            "issued_atoms": st.chain.issued(),
-            "peers": st.peer_count(),
-            "mempool": st.mempool.len(),
-        })),
+        "getinfo" => {
+            let peers = st.peers();
+            let outbound = peers.iter().filter(|p| p.outbound).count();
+            Ok(json!({
+                "version": VERSION,
+                "agent": agent(),
+                "network": st.chain.net.name,
+                "height": st.chain.height(),
+                "tip": hex(&st.chain.tip()),
+                "issued_atoms": st.chain.issued(),
+                "peers": peers.len(),
+                "outbound": outbound,
+                "known_addresses": st.book.len(),
+                "mempool": st.mempool.len(),
+                "mempool_bytes": st.mempool.bytes(),
+                "indexed_txs": st.index.tx_count(),
+                "uptime_s": now().saturating_sub(st.started),
+            }))
+        }
         "getblock" => {
             let h = u64_param(arg(0)?)?;
             let id = st.chain.active_id(h).ok_or("no block at that height")?;
             let b = st.chain.block(&id).unwrap();
-            Ok(json!({"id": hex(&id), "height": h, "time": b.header.time, "txs": b.txs.len(), "hex": hex(&b.encode())}))
+            let txids: Vec<String> = b.txs.iter().map(|t| hex(&t.txid())).collect();
+            Ok(
+                json!({"id": hex(&id), "height": h, "time": b.header.time, "target": hex(&b.header.target.to_be_bytes()),
+                      "txs": b.txs.len(), "txids": txids, "hex": hex(&b.encode())}),
+            )
+        }
+        "gettx" => {
+            let txid = hash_param(arg(0)?)?;
+            let (tx, height) = match st.index.locate(&txid) {
+                Some(loc) => (st.chain.block(&loc.block).unwrap().txs[loc.pos as usize].clone(), Some(loc.height)),
+                None => (st.mempool.get(&txid).cloned().ok_or("unknown transaction")?, None),
+            };
+            let tip = st.chain.height();
+            let mut total_in = 0u64;
+            let inputs: Vec<Value> = match &tx {
+                Tx::Transfer { inputs, .. } => inputs
+                    .iter()
+                    .map(|i| {
+                        let out = st.index.output(&i.prev).or_else(|| {
+                            st.mempool.get(&i.prev.txid).and_then(|t| t.outputs().get(i.prev.vout as usize).copied())
+                        });
+                        total_in += out.map(|o| o.value).unwrap_or(0);
+                        json!({"txid": hex(&i.prev.txid), "vout": i.prev.vout,
+                               "value": out.map(|o| o.value), "owner": out.map(|o| hex(&o.pkh))})
+                    })
+                    .collect(),
+                Tx::Coinbase { .. } => vec![],
+            };
+            let outputs: Vec<Value> =
+                tx.outputs().iter().map(|o| json!({"value": o.value, "owner": hex(&o.pkh)})).collect();
+            let total_out: u64 = tx.outputs().iter().map(|o| o.value).sum();
+            Ok(json!({
+                "txid": hex(&txid), "coinbase": tx.is_coinbase(), "height": height,
+                "confirmations": height.map(|h| tip - h + 1).unwrap_or(0),
+                "inputs": inputs, "outputs": outputs,
+                "fee": if tx.is_coinbase() { 0 } else { total_in.saturating_sub(total_out) },
+                "hex": hex(&tx.encode()),
+            }))
+        }
+        "history" => {
+            let owner = hash_param(arg(0)?)?;
+            let limit = p.get(1).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+            let tip = st.chain.height();
+            let mut v: Vec<Value> = st
+                .mempool
+                .activity(&st.chain, &owner)
+                .into_iter()
+                .rev()
+                .map(|(txid, r, s, _)| {
+                    json!({"txid": hex(&txid), "height": null, "confirmations": 0, "time": null, "received": r, "sent": s})
+                })
+                .collect();
+            for e in st.index.history(&owner, limit) {
+                let time = st.chain.active_id(e.height).and_then(|id| st.chain.block(&id)).map(|b| b.header.time);
+                v.push(json!({"txid": hex(&e.txid), "height": e.height, "confirmations": tip - e.height + 1,
+                              "time": time, "received": e.received, "sent": e.sent}));
+            }
+            v.truncate(limit);
+            Ok(json!(v))
         }
         "getwork" => {
             let payee = hash_param(arg(0)?)?;
@@ -138,18 +223,37 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             st.process_tx(tx, None).map(|id| json!(hex(&id))).map_err(|e| e.to_string())
         }
         "utxos" => {
+            // Confirmed unspent outputs (minus those spent by pooled transactions) and unconfirmed outputs
+            // of pooled transactions; both are spendable by a new transaction.
             let owner = hash_param(arg(0)?)?;
             let next = st.chain.height() + 1;
             let maturity = st.chain.net.maturity;
-            let v: Vec<Value> = st
+            let mut v: Vec<Value> = st
                 .chain
                 .coins_of(&owner)
                 .into_iter()
+                .filter(|(op, _)| !st.mempool.is_spent(op))
                 .map(|(op, c)| {
                     json!({
                         "txid": hex(&op.txid), "vout": op.vout, "value": c.output.value, "height": c.height,
-                        "coinbase": c.coinbase, "spendable": !c.coinbase || next - c.height >= maturity,
+                        "coinbase": c.coinbase, "confirmed": true,
+                        "spendable": !c.coinbase || next - c.height >= maturity,
                     })
+                })
+                .collect();
+            for (op, o) in st.mempool.pending_outputs(&owner) {
+                v.push(json!({"txid": hex(&op.txid), "vout": op.vout, "value": o.value, "height": null,
+                              "coinbase": false, "confirmed": false, "spendable": true}));
+            }
+            Ok(json!(v))
+        }
+        "getpeerinfo" | "peers" => {
+            let v: Vec<Value> = st
+                .peers()
+                .iter()
+                .map(|p| {
+                    json!({"addr": p.addr.to_string(), "outbound": p.outbound, "listen": p.listen.map(|a| a.to_string()),
+                           "agent": p.agent, "height": p.height, "connected_s": now().saturating_sub(p.since)})
                 })
                 .collect();
             Ok(json!(v))
@@ -159,18 +263,18 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             drop(st);
             crate::node::connect(shared, &addr).map(|_| json!(true)).map_err(|e| e.to_string())
         }
-        "peers" => Ok(json!(st.peer_addrs().iter().map(|a| a.to_string()).collect::<Vec<_>>())),
         _ => Err(format!("unknown method {method}")),
     }
 }
 
-/// Minimal client for tests and tools: one request per connection.
+/// Minimal client for tests and tools: one request per connection; sends `REQUANT_RPC_TOKEN` if set.
 pub fn request(addr: SocketAddr, method: &str, params: Value) -> io::Result<Value> {
     let body = json!({"method": method, "params": params}).to_string();
+    let auth = std::env::var("REQUANT_RPC_TOKEN").map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
     let mut s = TcpStream::connect(addr)?;
     write!(
         s,
-        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\n{auth}Content-Length: {}\r\n\r\n{body}",
         body.len()
     )?;
     let mut resp = String::new();

@@ -3,6 +3,8 @@
 //! requant-wallet keygen  KEYFILE                       [--network N]
 //! requant-wallet address KEYFILE                       [--network N]
 //! requant-wallet balance ADDRESS                       [--network N] [--rpc HOST:PORT]
+//! requant-wallet history ADDRESS [N]                   [--network N] [--rpc HOST:PORT]
+//! requant-wallet tx      TXID                          [--network N] [--rpc HOST:PORT]
 //! requant-wallet send    KEYFILE ADDRESS AMOUNT_RQT    [--fee ATOMS] [--network N] [--rpc HOST:PORT]
 
 use ed25519_dalek::SigningKey;
@@ -26,7 +28,8 @@ fn load_key(path: &str) -> SigningKey {
     SigningKey::from_bytes(&bytes)
 }
 
-fn coins(rpc: SocketAddr, owner: &[u8; 32]) -> Vec<(Spendable, bool, u64)> {
+/// `(coin, spendable now, confirmed)`.
+fn coins(rpc: SocketAddr, owner: &[u8; 32]) -> Vec<(Spendable, bool, bool)> {
     let v = request(rpc, "utxos", json!([hex(owner)])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
     v.as_array()
         .unwrap()
@@ -37,7 +40,7 @@ fn coins(rpc: SocketAddr, owner: &[u8; 32]) -> Vec<(Spendable, bool, u64)> {
             (
                 Spendable { op, value: c["value"].as_u64().unwrap() },
                 c["spendable"].as_bool().unwrap(),
-                c["height"].as_u64().unwrap(),
+                c["confirmed"].as_bool().unwrap_or(true),
             )
         })
         .collect()
@@ -78,10 +81,48 @@ fn main() {
         ["balance", addr] => {
             let owner = parse_address(&net, addr).unwrap_or_else(|e| die(e));
             let list = coins(rpc(), &owner);
-            let spendable: u64 = list.iter().filter(|c| c.1).map(|c| c.0.value).sum();
-            let immature: u64 = list.iter().filter(|c| !c.1).map(|c| c.0.value).sum();
-            println!("spendable {} RQT in {} outputs", format_amount(spendable), list.iter().filter(|c| c.1).count());
-            println!("immature  {} RQT", format_amount(immature));
+            let sum = |f: &dyn Fn(&(Spendable, bool, bool)) -> bool| list.iter().filter(|c| f(c)).map(|c| c.0.value).sum::<u64>();
+            let confirmed = sum(&|c| c.1 && c.2);
+            let pending = sum(&|c| !c.2);
+            let immature = sum(&|c| !c.1);
+            println!("confirmed   {} RQT in {} outputs", format_amount(confirmed), list.iter().filter(|c| c.1 && c.2).count());
+            println!("unconfirmed {} RQT (spendable)", format_amount(pending));
+            println!("immature    {} RQT (mined, not yet spendable)", format_amount(immature));
+        }
+        ["history", addr, rest @ ..] => {
+            let owner = parse_address(&net, addr).unwrap_or_else(|e| die(e));
+            let limit: u64 = rest.first().map(|n| n.parse().unwrap_or_else(|_| die("bad count"))).unwrap_or(20);
+            let v = request(rpc(), "history", json!([hex(&owner), limit])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+            println!("{:>8}  {:>6}  {:>20}  txid", "height", "conf", "amount RQT");
+            for e in v.as_array().unwrap() {
+                let (r, s) = (e["received"].as_u64().unwrap_or(0), e["sent"].as_u64().unwrap_or(0));
+                let amount = if r >= s { format!("+{}", format_amount(r - s)) } else { format!("-{}", format_amount(s - r)) };
+                let height = e["height"].as_u64().map(|h| h.to_string()).unwrap_or_else(|| "pending".into());
+                println!("{height:>8}  {:>6}  {amount:>20}  {}", e["confirmations"], e["txid"].as_str().unwrap_or(""));
+            }
+        }
+        ["tx", txid] => {
+            let v = request(rpc(), "gettx", json!([txid])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+            let show = |owner: &serde_json::Value| -> String {
+                owner
+                    .as_str()
+                    .and_then(|h| unhex(h).ok())
+                    .and_then(|b| <[u8; 32]>::try_from(b).ok())
+                    .map(|o| address(&net, &o))
+                    .unwrap_or_else(|| "?".into())
+            };
+            let height = v["height"].as_u64().map(|h| h.to_string()).unwrap_or_else(|| "pending".into());
+            println!("txid {}  height {height}  confirmations {}", v["txid"].as_str().unwrap_or(""), v["confirmations"]);
+            if v["coinbase"] == true {
+                println!("  coinbase (newly mined)");
+            }
+            for i in v["inputs"].as_array().unwrap() {
+                println!("  in  {:>20}  {}", format_amount(i["value"].as_u64().unwrap_or(0)), show(&i["owner"]));
+            }
+            for o in v["outputs"].as_array().unwrap() {
+                println!("  out {:>20}  {}", format_amount(o["value"].as_u64().unwrap_or(0)), show(&o["owner"]));
+            }
+            println!("  fee {:>20}", format_amount(v["fee"].as_u64().unwrap_or(0)));
         }
         ["send", path, to, amount] => {
             let key = load_key(path);
@@ -95,7 +136,7 @@ fn main() {
             println!("sent {} RQT, fee {} atoms, txid {}", format_amount(amount), fee, txid.as_str().unwrap_or(""));
         }
         _ => die(
-            "usage: requant-wallet keygen KEYFILE | address KEYFILE | balance ADDRESS | send KEYFILE ADDRESS AMOUNT \
+            "usage: requant-wallet keygen KEYFILE | address KEYFILE | balance ADDRESS | history ADDRESS [N] | tx TXID              | send KEYFILE ADDRESS AMOUNT \
              [--fee ATOMS] [--network test|regtest] [--rpc HOST:PORT]",
         ),
     }

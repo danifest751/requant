@@ -1,0 +1,16 @@
+# GPU miner next to a local node (CPPminer --algo tnet). Copy to /etc/systemd/system/, set User, paths
+# and PAYEE, then: systemctl enable --now requant-miner
+[Unit]
+Description=Requant test network GPU miner (CPPminer --algo tnet)
+After=requantd.service
+Wants=requantd.service
+
+[Service]
+User=miner
+Environment=PAYEE=<key hash from requant-wallet address>
+ExecStart=/opt/cppminer/cppminer --algo tnet --rpc 127.0.0.1:19334 --payee ${PAYEE}
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

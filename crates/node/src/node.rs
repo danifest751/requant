@@ -1,29 +1,51 @@
-//! Node: chain + mempool + storage behind one lock, a thread per peer (reader) with a writer thread fed by
-//! a channel, block-first sync by locator, block/transaction relay, and an optional CPU miner.
+//! Node: chain, mempool, storage, transaction index and peer address book behind one lock; a reader thread
+//! and a writer thread per peer; block-first sync by locator; block, transaction and address relay; a
+//! connection manager keeping configured and discovered peers connected; an optional CPU miner.
 
+use crate::addrbook::{routable, AddrBook};
+use crate::index::TxIndex;
 use crate::mempool::Mempool;
-use crate::msg::{read_msg, write_msg, Msg, MAX_INV, PROTOCOL};
+use crate::msg::{read_msg, write_msg, Msg, MAX_ADDR, MAX_INV, MIN_PROTOCOL, PROTOCOL};
 use crate::store::Store;
 use requant_consensus::block::Block;
 use requant_consensus::chain::{mine, Accepted, Chain};
 use requant_consensus::params::Network;
 use requant_consensus::tx::{Hash, Tx};
 use requant_consensus::Error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, Hasher};
 use std::io::{self, BufReader, BufWriter};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const MAX_PEERS: usize = 32;
+/// Outbound connections the manager tries to keep.
+pub const TARGET_OUTBOUND: usize = 8;
 pub const MAX_ORPHANS: usize = 256;
 const MAX_TEMPLATES: usize = 16;
+/// A peer silent for this long is dropped (pings go out every `PING_EVERY`).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
+const PING_EVERY: u64 = 120;
+/// How long an address that sent invalid data is refused.
+const BAN_SECS: u64 = 3600;
 
 pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn random_u64() -> u64 {
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(now());
+    h.finish()
+}
+
+pub fn agent() -> String {
+    format!("requantd/{VERSION}")
 }
 
 #[derive(Clone)]
@@ -32,6 +54,8 @@ pub struct Config {
     pub datadir: PathBuf,
     pub listen: SocketAddr,
     pub rpc: Option<SocketAddr>,
+    /// If set, RPC requests must carry `Authorization: Bearer <token>`.
+    pub rpc_token: Option<String>,
     pub connect: Vec<String>,
     /// Mine on the CPU, paying this key hash (practical on regtest only).
     pub mine_to: Option<Hash>,
@@ -41,6 +65,10 @@ pub struct Config {
     pub threads: usize,
     /// Refuse forks deeper than this below the tip (node policy; see `Chain::set_max_reorg`).
     pub max_reorg: u64,
+    /// Period of the connection manager (reconnects, new outbound peers, pings).
+    pub peer_interval: Duration,
+    /// Dial discovered addresses (off: only `--connect` peers and inbound connections).
+    pub discover: bool,
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -48,22 +76,34 @@ pub fn default_max_reorg(net: &Network) -> u64 {
     net.epoch_len.max(100)
 }
 
-struct Peer {
+pub struct Peer {
     tx: Sender<Msg>,
-    addr: SocketAddr,
-    height: u64,
+    pub addr: SocketAddr,
+    pub outbound: bool,
+    /// Where the peer accepts connections (outbound: `addr`; inbound: its IP and announced port).
+    pub listen: Option<SocketAddr>,
+    pub agent: String,
+    pub height: u64,
+    pub since: u64,
     inflight: usize,
 }
 
 pub struct State {
     pub chain: Chain,
     pub mempool: Mempool,
+    pub index: TxIndex,
+    pub book: AddrBook,
     store: Store,
     orphans: HashMap<Hash, Block>,
     peers: HashMap<u64, Peer>,
     next_peer: u64,
     /// Work handed out by `getwork`, by header digest.
     templates: Vec<(Hash, Block)>,
+    pub node_id: u64,
+    listen_port: u16,
+    bans: HashMap<IpAddr, u64>,
+    allow_local: bool,
+    pub started: u64,
 }
 
 pub type Shared = Arc<Mutex<State>>;
@@ -94,8 +134,33 @@ impl State {
         self.peers.len()
     }
 
+    pub fn peers(&self) -> Vec<&Peer> {
+        let mut v: Vec<&Peer> = self.peers.values().collect();
+        v.sort_by_key(|p| p.since);
+        v
+    }
+
     pub fn peer_addrs(&self) -> Vec<SocketAddr> {
         self.peers.values().map(|p| p.addr).collect()
+    }
+
+    /// Addresses we are connected to, as dialable addresses.
+    fn connected(&self) -> HashSet<SocketAddr> {
+        self.peers.values().filter_map(|p| p.listen).collect()
+    }
+
+    fn outbound_count(&self) -> usize {
+        self.peers.values().filter(|p| p.outbound).count()
+    }
+
+    pub fn banned(&self, ip: &IpAddr) -> bool {
+        self.bans.get(ip).is_some_and(|&t| t > now())
+    }
+
+    fn ban(&mut self, ip: IpAddr) {
+        if !ip.is_loopback() {
+            self.bans.insert(ip, now() + BAN_SECS);
+        }
     }
 
     /// Accept a block from a peer (`from`) or a local miner; relay and persist it, then resolve orphans.
@@ -116,6 +181,13 @@ impl State {
                     }
                     if acc != Accepted::SideChain {
                         self.mempool.revalidate(&self.chain);
+                        // transactions of blocks a reorganisation took off the chain go back to the pool
+                        for old in self.chain.take_disconnected() {
+                            for tx in &old.txs[1..] {
+                                let _ = self.mempool.add(tx.clone(), &self.chain);
+                            }
+                        }
+                        self.index.sync(&self.chain);
                     }
                     self.broadcast(&Msg::Inv(vec![id]), from);
                     let children: Vec<Hash> =
@@ -156,7 +228,7 @@ impl State {
 
     /// A block template for `payee` with pooled transactions, remembered for `submit_work`.
     pub fn new_work(&mut self, payee: &Hash) -> (Block, Hash) {
-        let txs = self.mempool.select(900_000);
+        let (txs, fees) = self.mempool.select(900_000);
         let net = &self.chain.net;
         let time = if net.name == "regtest" {
             // on-schedule timestamps keep the regtest difficulty constant however fast blocks come
@@ -164,7 +236,8 @@ impl State {
         } else {
             now()
         };
-        let b = self.chain.template(payee, txs, time);
+        let tip = self.chain.tip();
+        let b = self.chain.template_with_fees(&tip, payee, txs, fees, time);
         let seed = self.chain.epoch_seed(&b.header.prev, b.header.height);
         let digest = b.header.digest(&self.chain.net.chain_id);
         if self.templates.len() == MAX_TEMPLATES {
@@ -190,17 +263,67 @@ impl State {
         self.process_block(b, None)
     }
 
+    fn hello(&self) -> Msg {
+        Msg::Hello {
+            protocol: PROTOCOL,
+            height: self.chain.height(),
+            tip: self.chain.tip(),
+            node_id: self.node_id,
+            listen_port: self.listen_port,
+            agent: agent(),
+        }
+    }
+
     fn on_message(&mut self, peer: u64, m: Msg) -> Result<(), &'static str> {
         match m {
-            Msg::Hello { protocol, height, tip } => {
-                if protocol != PROTOCOL {
+            Msg::Hello { protocol, height, tip, node_id, listen_port, agent } => {
+                if protocol < MIN_PROTOCOL {
                     return Err("protocol version");
                 }
-                if let Some(p) = self.peers.get_mut(&peer) {
-                    p.height = height;
+                let Some(p) = self.peers.get(&peer) else { return Ok(()) };
+                let (addr, outbound) = (p.addr, p.outbound);
+                if node_id == self.node_id {
+                    if outbound {
+                        self.book.remove(&addr);
+                    }
+                    return Err("connected to self");
                 }
+                let listen = if outbound {
+                    Some(addr)
+                } else {
+                    (listen_port != 0).then(|| SocketAddr::new(addr.ip(), listen_port))
+                };
+                let p = self.peers.get_mut(&peer).unwrap();
+                p.height = height;
+                p.agent = agent.chars().filter(|c| !c.is_control()).take(64).collect();
+                p.listen = listen;
+                if outbound {
+                    self.book.good(&addr, now());
+                } else if let Some(l) = listen {
+                    self.book.add(l);
+                }
+                self.send(peer, Msg::GetAddr);
                 if height > self.chain.height() || !self.chain.contains(&tip) {
                     self.send(peer, Msg::GetBlocks(self.chain.locator()));
+                }
+            }
+            Msg::GetAddr => {
+                let mut v: Vec<SocketAddr> = self.peers.values().filter(|p| p.outbound).map(|p| p.addr).collect();
+                for a in self.book.sample(MAX_ADDR) {
+                    if v.len() >= MAX_ADDR {
+                        break;
+                    }
+                    if !v.contains(&a) {
+                        v.push(a);
+                    }
+                }
+                v.retain(|a| routable(a, self.allow_local));
+                v.truncate(MAX_ADDR);
+                self.send(peer, Msg::Addr(v));
+            }
+            Msg::Addr(v) => {
+                for a in v {
+                    self.book.add(a);
                 }
             }
             Msg::GetBlocks(loc) => {
@@ -223,6 +346,8 @@ impl State {
                 for id in ids {
                     if let Some(b) = self.chain.block(&id) {
                         self.send(peer, Msg::Block(b.encode()));
+                    } else if let Some(tx) = self.mempool.get(&id) {
+                        self.send(peer, Msg::Tx(tx.encode()));
                     }
                 }
             }
@@ -260,20 +385,31 @@ fn magic(net: &Network) -> [u8; 4] {
 }
 
 /// Register a connected peer and run its reader loop on a new thread.
-fn spawn_peer(shared: Shared, stream: TcpStream) -> io::Result<()> {
+fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<()> {
     let addr = stream.peer_addr()?;
     stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
     let (tx, rx) = channel::<Msg>();
     let (id, hello, magic) = {
         let mut st = shared.lock().unwrap();
-        if st.peers.len() >= MAX_PEERS {
+        if st.peers.len() >= MAX_PEERS || st.banned(&addr.ip()) {
+            let _ = stream.shutdown(std::net::Shutdown::Both);
             return Ok(());
         }
         let id = st.next_peer;
         st.next_peer += 1;
-        st.peers.insert(id, Peer { tx: tx.clone(), addr, height: 0, inflight: 0 });
-        let hello = Msg::Hello { protocol: PROTOCOL, height: st.chain.height(), tip: st.chain.tip() };
-        (id, hello, magic(&st.chain.net))
+        let peer = Peer {
+            tx: tx.clone(),
+            addr,
+            outbound,
+            listen: outbound.then_some(addr),
+            agent: String::new(),
+            height: 0,
+            since: now(),
+            inflight: 0,
+        };
+        st.peers.insert(id, peer);
+        (id, st.hello(), magic(&st.chain.net))
     };
     let mut writer = BufWriter::new(stream.try_clone()?);
     std::thread::spawn(move || {
@@ -290,7 +426,12 @@ fn spawn_peer(shared: Shared, stream: TcpStream) -> io::Result<()> {
         while let Ok(m) = read_msg(&mut reader, &magic) {
             let mut st = shared.lock().unwrap();
             if let Err(why) = st.on_message(id, m) {
-                eprintln!("peer {addr}: disconnecting ({why})");
+                if why != "connected to self" {
+                    eprintln!("peer {addr}: disconnecting ({why})");
+                    if why.starts_with("invalid") || why.starts_with("malformed") {
+                        st.ban(addr.ip());
+                    }
+                }
                 break;
             }
         }
@@ -303,13 +444,17 @@ fn spawn_peer(shared: Shared, stream: TcpStream) -> io::Result<()> {
 /// Connect to `addr` (host:port) and run the peer.
 pub fn connect(shared: &Shared, addr: &str) -> io::Result<()> {
     let sa = addr.to_socket_addrs()?.next().ok_or_else(|| io::Error::other("no address"))?;
+    if shared.lock().unwrap().banned(&sa.ip()) {
+        return Err(io::Error::other("address is banned"));
+    }
     let stream = TcpStream::connect_timeout(&sa, Duration::from_secs(10))?;
-    spawn_peer(shared.clone(), stream)
+    spawn_peer(shared.clone(), stream, true)
 }
 
 /// Open storage, replay it, and start listening, connecting, RPC and mining as configured.
 pub fn start(cfg: Config) -> io::Result<Handle> {
-    let (store, records) = Store::open(&cfg.datadir.join(cfg.net.name))?;
+    let dir = cfg.datadir.join(cfg.net.name);
+    let (store, records) = Store::open(&dir)?;
     let mut chain = Chain::new(cfg.net.clone(), cfg.threads);
     chain.set_max_reorg(cfg.max_reorg);
     let mut replayed = 0;
@@ -325,34 +470,45 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     if replayed > 0 {
         eprintln!("replayed {replayed} blocks, height {}", chain.height());
     }
+    let mut index = TxIndex::default();
+    index.sync(&chain);
+    let allow_local = cfg.net.name == "regtest";
+    let listener = TcpListener::bind(cfg.listen)?;
+    let p2p = listener.local_addr()?;
     let state = State {
         chain,
         mempool: Mempool::default(),
+        index,
+        book: AddrBook::load(Some(dir.join("peers.txt")), allow_local),
         store,
         orphans: HashMap::new(),
         peers: HashMap::new(),
         next_peer: 0,
         templates: Vec::new(),
+        node_id: random_u64(),
+        listen_port: p2p.port(),
+        bans: HashMap::new(),
+        allow_local,
+        started: now(),
     };
     let shared: Shared = Arc::new(Mutex::new(state));
     let stop = Arc::new(AtomicBool::new(false));
 
-    let listener = TcpListener::bind(cfg.listen)?;
-    let p2p = listener.local_addr()?;
     {
         let shared = shared.clone();
         std::thread::spawn(move || {
             for s in listener.incoming().flatten() {
-                let _ = spawn_peer(shared.clone(), s);
+                let _ = spawn_peer(shared.clone(), s, false);
             }
         });
     }
-    for addr in cfg.connect.clone() {
-        let (shared, stop) = (shared.clone(), stop.clone());
-        std::thread::spawn(move || keep_connected(shared, addr, stop));
+    {
+        let (shared, stop, configured) = (shared.clone(), stop.clone(), cfg.connect.clone());
+        let (interval, discover) = (cfg.peer_interval, cfg.discover);
+        std::thread::spawn(move || connection_manager(shared, configured, interval, discover, stop));
     }
     let rpc = match cfg.rpc {
-        Some(a) => Some(crate::rpc::serve(shared.clone(), a)?),
+        Some(a) => Some(crate::rpc::serve(shared.clone(), a, cfg.rpc_token.clone())?),
         None => None,
     };
     {
@@ -366,24 +522,67 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     Ok(Handle { shared, p2p, rpc, stop })
 }
 
-/// Stay connected to a configured peer: (re)connect whenever no connection to it is open.
-fn keep_connected(shared: Shared, addr: String, stop: Arc<AtomicBool>) {
-    let mut warned = false;
+/// Keep `--connect` peers connected, fill outbound slots from the address book, ping peers, save the book.
+fn connection_manager(
+    shared: Shared,
+    configured: Vec<String>,
+    interval: Duration,
+    discover: bool,
+    stop: Arc<AtomicBool>,
+) {
+    let mut rng = random_u64() | 1;
+    let mut warned: HashSet<String> = HashSet::new();
+    let (mut last_ping, mut last_save) = (0u64, now());
     while !stop.load(Ordering::Relaxed) {
-        let target = addr.to_socket_addrs().ok().and_then(|mut a| a.next());
-        let connected = target.is_some_and(|t| shared.lock().unwrap().peer_addrs().contains(&t));
-        if !connected {
-            match connect(&shared, &addr) {
-                Ok(()) => warned = false,
-                Err(e) if !warned => {
-                    eprintln!("connect {addr}: {e} (retrying every 30 s)");
-                    warned = true;
+        for addr in &configured {
+            let target = addr.to_socket_addrs().ok().and_then(|mut a| a.next());
+            if let Some(t) = target {
+                shared.lock().unwrap().book.add(t);
+            }
+            let connected = target.is_some_and(|t| shared.lock().unwrap().connected().contains(&t));
+            if !connected {
+                match connect(&shared, addr) {
+                    Ok(()) => {
+                        warned.remove(addr);
+                    }
+                    Err(e) => {
+                        if warned.insert(addr.clone()) {
+                            eprintln!("connect {addr}: {e} (retrying)");
+                        }
+                    }
                 }
-                Err(_) => {}
             }
         }
-        std::thread::sleep(Duration::from_secs(30));
+        if discover {
+            let (missing, candidates) = {
+                let st = shared.lock().unwrap();
+                let missing = TARGET_OUTBOUND.saturating_sub(st.outbound_count());
+                (missing, if missing > 0 { st.book.candidates(&st.connected(), now()) } else { Vec::new() })
+            };
+            let mut candidates = candidates;
+            for _ in 0..missing.min(candidates.len()) {
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                let a = candidates.swap_remove((rng % candidates.len() as u64) as usize);
+                shared.lock().unwrap().book.attempt(&a, now());
+                if connect(&shared, &a.to_string()).is_err() {
+                    shared.lock().unwrap().book.failed(&a);
+                }
+            }
+        }
+        let t = now();
+        if t >= last_ping + PING_EVERY {
+            last_ping = t;
+            shared.lock().unwrap().broadcast(&Msg::Ping(t), None);
+        }
+        if t >= last_save + 300 {
+            last_save = t;
+            shared.lock().unwrap().book.save();
+        }
+        std::thread::sleep(interval);
     }
+    shared.lock().unwrap().book.save();
 }
 
 /// Derive the weights of the current and the next epoch off the lock, as soon as their seeds are known,

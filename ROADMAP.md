@@ -38,15 +38,18 @@ test network.
 - [x] Mempool (no chains of unconfirmed transactions yet) and JSON-RPC (`getinfo`, `getblock`,
       `getwork`/`submitwork`, `sendtx`, `utxos`, `addpeer`, `peers`).
 - [x] Wallet CLI (`requant-wallet`): key generation from the OS RNG, bech32m addresses (`rq1`, `trq1`,
-      `rqrt1`), balance, send. Next: spending unconfirmed change, several payments per block, encrypted
-      key files, hardware wallets.
-- [ ] Headers-first sync; peer discovery and address gossip; persistent ban list.
+      `rqrt1`), balance (confirmed, unconfirmed, immature), history, transaction details, send (also from
+      unconfirmed change). Next: encrypted key files, several keys per wallet, hardware wallets.
+- [x] Node 0.2: protocol 2 (node id, listening port, agent; extensible greeting), address gossip with an
+      on-disk address book and an outbound connection manager, pings and idle timeouts, one-hour bans for
+      invalid data, transaction and address index (`history`, `gettx`), chains of unconfirmed
+      transactions in the pool, reorged transactions returned to the pool, optional RPC token.
+- [ ] Headers-first sync; persistent ban list.
 - [x] Deep-fork protection: forks more than `--max-reorg` blocks below the tip (default one epoch) are
       refused before their work is checked (node policy; recovery after a longer partition is manual).
 - [x] The current and next epoch's weights are derived on a background thread once their seeds are known.
 - [ ] Keep a UTXO snapshot instead of replaying all blocks on start; transaction index.
-- [ ] Return transactions of disconnected blocks to the pool after a reorg.
-- [ ] RPC authentication (now: no auth, bind to localhost only).
+- [x] RPC token (`--rpc-token-file`; clients send `REQUANT_RPC_TOKEN`).
 
 ## 3. Miner
 

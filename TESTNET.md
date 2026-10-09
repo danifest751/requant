@@ -28,6 +28,8 @@ a laptop or VPS CPU. JSON-RPC listens on `127.0.0.1:19334` only.
 ```sh
 target/release/requant-wallet keygen my.key --network test        # address trq1... and key hash
 target/release/requant-wallet balance <address> --network test
+target/release/requant-wallet history <address> --network test
+target/release/requant-wallet tx <txid> --network test
 target/release/requant-wallet send my.key <address> 1.5 --network test
 ```
 
@@ -45,5 +47,5 @@ A CMP 50HX (Turing) does about 3.5 M tickets/s; an RTX 3090 about 6.3 M.
 
 ## Known limits of this version
 
-No peer discovery (use `--connect`), block-first sync, no RPC authentication, the wallet does not spend
-unconfirmed change; see `ROADMAP.md`.
+Block-first sync (no headers-first yet), address book in memory and `peers.txt` only; see `ROADMAP.md`.
+Upgrading nodes: `deploy/README.md`.

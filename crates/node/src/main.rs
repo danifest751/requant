@@ -1,10 +1,11 @@
 //! `requantd`: the Requant full node.
 //!
 //! requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...
-//!          [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
+//!          [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS] [--rpc-token-file FILE]
+//!          [--no-discover] [--version]
 
 use requant_consensus::params::Network;
-use requant_node::node::{default_max_reorg, start, Config};
+use requant_node::node::{agent, default_max_reorg, start, Config};
 use requant_node::rpc::unhex;
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ fn main() {
     let (mut datadir, mut listen, mut rpc) = ("requant-data".to_string(), None, None);
     let (mut connect, mut mine_to, mut interval, mut threads) = (Vec::new(), None, 1000u64, 4usize);
     let mut max_reorg = None::<u64>;
+    let (mut rpc_token, mut discover) = (None::<String>, true);
     let mut k = 0;
     let value = |k: usize| args.get(k + 1).cloned().unwrap_or_else(|| usage(&format!("{} needs a value", args[k])));
     while k < args.len() {
@@ -33,6 +35,20 @@ fn main() {
             "--mine-interval-ms" => interval = value(k).parse().unwrap_or_else(|_| usage("bad interval")),
             "--threads" => threads = value(k).parse().unwrap_or_else(|_| usage("bad thread count")),
             "--max-reorg" => max_reorg = Some(value(k).parse().unwrap_or_else(|_| usage("bad --max-reorg"))),
+            "--rpc-token-file" => {
+                let f = value(k);
+                let t = std::fs::read_to_string(&f).unwrap_or_else(|e| usage(&format!("{f}: {e}")));
+                rpc_token = Some(t.trim().to_string());
+            }
+            "--no-discover" => {
+                discover = false;
+                k += 1;
+                continue;
+            }
+            "--version" => {
+                println!("{}", agent());
+                return;
+            }
             "-h" | "--help" => usage(""),
             other => usage(&format!("unknown argument {other}")),
         }
@@ -52,11 +68,14 @@ fn main() {
         mine_interval: Duration::from_millis(interval),
         threads,
         max_reorg,
+        rpc_token,
+        peer_interval: Duration::from_secs(15),
+        discover,
     };
     let net_name = cfg.net.name;
     match start(cfg) {
         Ok(h) => {
-            eprintln!("requantd {net_name}: p2p {} rpc {}", h.p2p, h.rpc.map(|a| a.to_string()).unwrap_or_default());
+            eprintln!("{} {net_name}: p2p {} rpc {}", agent(), h.p2p, h.rpc.map(|a| a.to_string()).unwrap_or_default());
             loop {
                 std::thread::sleep(Duration::from_secs(60));
                 let st = h.shared.lock().unwrap();
@@ -76,7 +95,8 @@ fn usage(msg: &str) -> ! {
     }
     eprintln!(
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
-         \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]"
+         \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
+\n                         [--rpc-token-file FILE] [--no-discover] [--version]"
     );
     std::process::exit(2)
 }
