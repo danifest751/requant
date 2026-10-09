@@ -1,0 +1,10 @@
+[package]
+name = "requant-consensus"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Requant consensus rules (CHAIN.md) on the TNet work function."
+
+[dependencies]
+tnet = { path = "../tnet" }
+ed25519-dalek = "=2.2.0"

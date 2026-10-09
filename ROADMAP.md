@@ -13,6 +13,11 @@ decisions for the project owner, not engineering defaults.
 
 ## 1. Chain parameters
 
+Draft rules: `CHAIN.md` (60 s blocks, ASERT, daily epochs, smooth emission with a tail, UTXO + ed25519);
+consensus core in `crates/consensus` (encoding, transactions, blocks, difficulty, emission, in-memory chain
+with reorganisation, regtest miner). Open below: funding model, genesis of the test network.
+
+
 - [ ] Block time and retarget rule; target encoding (compact or full 256-bit) (**owner** for the
       block time).
 - [ ] Epoch length `E` and look-back `K` (`SPEC.md` §8); node behaviour at epoch boundaries
