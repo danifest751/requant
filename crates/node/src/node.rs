@@ -69,6 +69,8 @@ pub struct Config {
     pub peer_interval: Duration,
     /// Dial discovered addresses (off: only `--connect` peers and inbound connections).
     pub discover: bool,
+    /// Serve the read-only block explorer here.
+    pub explorer: Option<SocketAddr>,
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -511,6 +513,10 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         Some(a) => Some(crate::rpc::serve(shared.clone(), a, cfg.rpc_token.clone())?),
         None => None,
     };
+    if let Some(a) = cfg.explorer {
+        let at = crate::explorer::serve(shared.clone(), a)?;
+        eprintln!("explorer on http://{at}");
+    }
     {
         let (shared, stop) = (shared.clone(), stop.clone());
         std::thread::spawn(move || epoch_preparer(shared, stop));

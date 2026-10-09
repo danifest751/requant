@@ -44,6 +44,8 @@ test network.
       on-disk address book and an outbound connection manager, pings and idle timeouts, one-hour bans for
       invalid data, transaction and address index (`history`, `gettx`), chains of unconfirmed
       transactions in the pool, reorged transactions returned to the pool, optional RPC token.
+- [x] Read-only block explorer in the node (`--explorer ADDR`): summary, latest blocks, block, transaction
+      and address pages, search.
 - [ ] Headers-first sync; persistent ban list.
 - [x] Deep-fork protection: forks more than `--max-reorg` blocks below the tip (default one epoch) are
       refused before their work is checked (node policy; recovery after a longer partition is manual).

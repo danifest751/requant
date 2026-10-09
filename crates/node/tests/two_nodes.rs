@@ -34,6 +34,7 @@ fn node(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>) -> Handle {
         rpc_token: None,
         peer_interval: Duration::from_millis(300),
         discover: true,
+        explorer: None,
     })
     .unwrap()
 }

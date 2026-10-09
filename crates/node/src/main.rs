@@ -2,7 +2,7 @@
 //!
 //! requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...
 //!          [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS] [--rpc-token-file FILE]
-//!          [--no-discover] [--version]
+//!          [--no-discover] [--explorer ADDR] [--version]
 
 use requant_consensus::params::Network;
 use requant_node::node::{agent, default_max_reorg, start, Config};
@@ -16,6 +16,7 @@ fn main() {
     let (mut connect, mut mine_to, mut interval, mut threads) = (Vec::new(), None, 1000u64, 4usize);
     let mut max_reorg = None::<u64>;
     let (mut rpc_token, mut discover) = (None::<String>, true);
+    let mut explorer = None;
     let mut k = 0;
     let value = |k: usize| args.get(k + 1).cloned().unwrap_or_else(|| usage(&format!("{} needs a value", args[k])));
     while k < args.len() {
@@ -25,6 +26,7 @@ fn main() {
             "--listen" => listen = Some(value(k)),
             "--rpc" => rpc = Some(value(k)),
             "--connect" => connect.push(value(k)),
+            "--explorer" => explorer = Some(value(k).parse().unwrap_or_else(|_| usage("bad --explorer address"))),
             "--mine" => {
                 let h: [u8; 32] = unhex(&value(k))
                     .ok()
@@ -71,6 +73,7 @@ fn main() {
         rpc_token,
         peer_interval: Duration::from_secs(15),
         discover,
+        explorer,
     };
     let net_name = cfg.net.name;
     match start(cfg) {
@@ -96,7 +99,7 @@ fn usage(msg: &str) -> ! {
     eprintln!(
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
          \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
-\n                         [--rpc-token-file FILE] [--no-discover] [--version]"
+\n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--version]"
     );
     std::process::exit(2)
 }

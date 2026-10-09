@@ -81,22 +81,30 @@ fn main() {
         ["balance", addr] => {
             let owner = parse_address(&net, addr).unwrap_or_else(|e| die(e));
             let list = coins(rpc(), &owner);
-            let sum = |f: &dyn Fn(&(Spendable, bool, bool)) -> bool| list.iter().filter(|c| f(c)).map(|c| c.0.value).sum::<u64>();
+            let sum = |f: &dyn Fn(&(Spendable, bool, bool)) -> bool| {
+                list.iter().filter(|c| f(c)).map(|c| c.0.value).sum::<u64>()
+            };
             let confirmed = sum(&|c| c.1 && c.2);
             let pending = sum(&|c| !c.2);
             let immature = sum(&|c| !c.1);
-            println!("confirmed   {} RQT in {} outputs", format_amount(confirmed), list.iter().filter(|c| c.1 && c.2).count());
+            println!(
+                "confirmed   {} RQT in {} outputs",
+                format_amount(confirmed),
+                list.iter().filter(|c| c.1 && c.2).count()
+            );
             println!("unconfirmed {} RQT (spendable)", format_amount(pending));
             println!("immature    {} RQT (mined, not yet spendable)", format_amount(immature));
         }
         ["history", addr, rest @ ..] => {
             let owner = parse_address(&net, addr).unwrap_or_else(|e| die(e));
             let limit: u64 = rest.first().map(|n| n.parse().unwrap_or_else(|_| die("bad count"))).unwrap_or(20);
-            let v = request(rpc(), "history", json!([hex(&owner), limit])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+            let v =
+                request(rpc(), "history", json!([hex(&owner), limit])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
             println!("{:>8}  {:>6}  {:>20}  txid", "height", "conf", "amount RQT");
             for e in v.as_array().unwrap() {
                 let (r, s) = (e["received"].as_u64().unwrap_or(0), e["sent"].as_u64().unwrap_or(0));
-                let amount = if r >= s { format!("+{}", format_amount(r - s)) } else { format!("-{}", format_amount(s - r)) };
+                let amount =
+                    if r >= s { format!("+{}", format_amount(r - s)) } else { format!("-{}", format_amount(s - r)) };
                 let height = e["height"].as_u64().map(|h| h.to_string()).unwrap_or_else(|| "pending".into());
                 println!("{height:>8}  {:>6}  {amount:>20}  {}", e["confirmations"], e["txid"].as_str().unwrap_or(""));
             }
@@ -112,7 +120,11 @@ fn main() {
                     .unwrap_or_else(|| "?".into())
             };
             let height = v["height"].as_u64().map(|h| h.to_string()).unwrap_or_else(|| "pending".into());
-            println!("txid {}  height {height}  confirmations {}", v["txid"].as_str().unwrap_or(""), v["confirmations"]);
+            println!(
+                "txid {}  height {height}  confirmations {}",
+                v["txid"].as_str().unwrap_or(""),
+                v["confirmations"]
+            );
             if v["coinbase"] == true {
                 println!("  coinbase (newly mined)");
             }
@@ -135,9 +147,9 @@ fn main() {
                 request(rpc(), "sendtx", json!([hex(&tx.encode())])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
             println!("sent {} RQT, fee {} atoms, txid {}", format_amount(amount), fee, txid.as_str().unwrap_or(""));
         }
-        _ => die(
-            "usage: requant-wallet keygen KEYFILE | address KEYFILE | balance ADDRESS | history ADDRESS [N] | tx TXID              | send KEYFILE ADDRESS AMOUNT \
-             [--fee ATOMS] [--network test|regtest] [--rpc HOST:PORT]",
-        ),
+        _ => die(concat!(
+            "usage: requant-wallet keygen KEYFILE | address KEYFILE | balance ADDRESS | history ADDRESS [N] | tx TXID",
+            " | send KEYFILE ADDRESS AMOUNT [--fee ATOMS] [--network test|regtest] [--rpc HOST:PORT]"
+        )),
     }
 }

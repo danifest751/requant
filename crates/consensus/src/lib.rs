@@ -1,6 +1,7 @@
 //! Requant consensus rules (CHAIN.md): encoding, transactions, blocks, difficulty, emission and an
 //! in-memory chain state with reorganisation. The work function is the `tnet` crate (SPEC.md).
 
+pub mod address;
 pub mod block;
 pub mod chain;
 pub mod codec;
