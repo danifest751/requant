@@ -26,7 +26,6 @@ test network.
 - [ ] Header layout and `header_digest`; block id; genesis.
 - [x] Emission: smooth curve with a 0.25 RQT tail; 6% development fund for heights 1..2^21 (**owner**).
 - [x] Test network fund key: `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` (**owner**).
-- [ ] Before the test network starts: the genesis time in `crates/consensus/src/params.rs`.
 
 ## 2. Node
 
@@ -61,7 +60,12 @@ test network.
 
 ## 4. Network launch
 
-- [ ] Private testnet, then a public testnet with a reset policy.
+- [x] Public test network since 2026-10-09 17:34 UTC: three seed nodes and one GPU miner (`TESTNET.md`);
+      it may be reset when the rules change.
+- [ ] Run it for weeks: reorgs between miners, epoch changes (every 1440 blocks), restarts, attacks;
+      more miners (RTX 3090).
+- [ ] Before the main network: genesis time and target, fund key, external review.
+- [x] Before the test network started: the genesis time in `crates/consensus/src/params.rs`.
 - [ ] Security policy for consensus bugs; release signing.
 
 ## Research still open (tracked in the Abacus repository)
