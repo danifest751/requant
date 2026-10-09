@@ -525,6 +525,11 @@ impl State {
                 }
             }
             Msg::Inv(ids) => {
+                // an announced block we already have still tells how far the peer is
+                let known = ids.iter().filter_map(|id| self.chain.block(id)).map(|b| b.header.height).max();
+                if let (Some(h), Some(p)) = (known, self.peers.get_mut(&peer)) {
+                    p.height = p.height.max(h);
+                }
                 let want: Vec<Hash> =
                     ids.into_iter().filter(|id| !self.chain.contains(id) && !self.orphans.contains_key(id)).collect();
                 if !want.is_empty() {

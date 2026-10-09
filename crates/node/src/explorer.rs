@@ -459,6 +459,9 @@ fn badge(status: &str) -> String {
     let (cls, text) = match status {
         "credited" => ("b-ok", "credited"),
         "orphaned" => ("b-bad", "orphaned"),
+        "confirmed" => ("b-ok", "confirmed"),
+        "pending" => ("b-warn", "unconfirmed"),
+        "returned" => ("b-bad", "returned"),
         _ => ("b-warn", "maturing"),
     };
     format!("<span class=\"badge {cls}\">{text}</span>")
@@ -543,17 +546,18 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
             format_amount(n(&b["reward"]))
         );
     }
-    body += "</tbody></table></div><h2>Payouts</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th>Time (UTC)</th><th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr></thead><tbody>";
+    body += "</tbody></table></div><h2>Payouts</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th>Time (UTC)</th><th>Status</th><th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr></thead><tbody>";
     let payouts = s["payouts"].as_array().cloned().unwrap_or_default();
     if payouts.is_empty() {
-        body += "<tr><td colspan=\"4\" class=\"empty\">No payouts yet: balances are paid once they reach the minimum and the blocks have matured.</td></tr>";
+        body += "<tr><td colspan=\"5\" class=\"empty\">No payouts yet: balances are paid once they reach the minimum and the blocks have matured.</td></tr>";
     }
     for p in &payouts {
         let t = p["txid"].as_str().unwrap_or("");
         body += &format!(
-            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
+            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{}</td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
             short(t),
             utc(n(&p["time"])),
+            badge(p["status"].as_str().unwrap_or("confirmed")),
             n(&p["outputs"]),
             format_amount(n(&p["total"]))
         );

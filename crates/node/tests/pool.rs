@@ -120,6 +120,15 @@ fn pool_shares_blocks_and_payouts() {
         .unwrap();
     assert_eq!(junk["accepted"], false);
 
+    // a share found on the previous tip just before a block moved it is credited, but not as a block
+    let old = request(pool_addr, "getwork", json!([hex(&bob)])).unwrap();
+    let (n1, i1, c1, p1) = find_share(&old, 900_000);
+    if submit(pool_addr, &alice, 950_000)["block"] == true {
+        let late = request(pool_addr, "submitwork", json!([old["header_digest"], n1, i1, c1, p1, hex(&bob)])).unwrap();
+        assert_eq!(late["accepted"], true, "{late}");
+        assert_eq!(late["block"], false, "{late}");
+    }
+
     // matured credits are paid on chain to both miners, alice about twice bob
     let t = Instant::now();
     let paid = |who: &Hash| -> u64 {
@@ -131,10 +140,14 @@ fn pool_shares_blocks_and_payouts() {
             .map(|c| c["value"].as_u64().unwrap())
             .sum()
     };
+    let confirmed = || {
+        let s = request(pool_addr, "poolstats", json!([])).unwrap();
+        s["payouts"].as_array().unwrap().iter().any(|p| p["status"] == "confirmed")
+    };
     loop {
         // keep the chain moving so coinbases mature and payouts confirm
         let _ = submit(pool_addr, &alice, t.elapsed().as_millis() as u64 * 7);
-        if paid(&alice) > 0 && paid(&bob) > 0 {
+        if paid(&alice) > 0 && paid(&bob) > 0 && confirmed() {
             break;
         }
         assert!(t.elapsed() < Duration::from_secs(120), "no payouts");

@@ -106,6 +106,8 @@ impl Network {
         let mut n =
             Self::make("test", tnet::V1, (1440, 60), 248, TEST_GENESIS_TIME, 100, (TEST_DEV_FUND, DEV_FUND_LAST));
         n.genesis_target = U256::low_mask(TEST_GENESIS_TARGET_BITS);
+        // chainwork of the test network at height 355 (2026-10-10)
+        n.min_chain_work = U256([0x12_2219_6194, 0, 0, 0]);
         n
     }
 

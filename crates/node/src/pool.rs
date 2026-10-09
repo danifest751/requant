@@ -13,7 +13,7 @@ use requant_consensus::tx::{pkh, Hash, Input, Output, Tx};
 use requant_consensus::u256::U256;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,8 +43,15 @@ const JOB_REFRESH: u64 = 30;
 const JOBS_KEPT: usize = 4;
 /// Window for the hashrate estimates.
 const RATE_WINDOW: u64 = 600;
-/// Devices without a share for this long are not listed (their counts stay in the address's totals).
-const DEVICE_LISTED: u64 = 86_400;
+/// Shares for the previous tip are accepted this many seconds after it changed (credited, never blocks).
+const STALE_GRACE: u64 = 10;
+/// A client address with this many invalid shares within `INVALID_WINDOW` seconds is refused `REFUSE_SECS`.
+const INVALID_LIMIT: u32 = 20;
+const INVALID_WINDOW: u64 = 600;
+const REFUSE_SECS: u64 = 3600;
+/// A device without a share for this long is dropped from the statistics (rewards are unaffected: they
+/// follow the share window); a device that comes back starts counting again.
+const DEVICE_KEPT: u64 = 3600;
 
 #[derive(Clone)]
 pub struct PoolConfig {
@@ -98,6 +105,13 @@ struct Payout {
     time: u64,
     total: u64,
     outputs: usize,
+    /// Amount per miner, to give back if the transaction can never confirm.
+    paid: Vec<(Hash, u64)>,
+    /// "pending" (sent, not in a block yet), "confirmed", or "returned" (an input was spent elsewhere, so it
+    /// can never confirm; balances restored).
+    status: &'static str,
+    /// The transaction, for sending it again while pending.
+    tx: Option<Tx>,
 }
 
 pub struct Pool {
@@ -107,6 +121,15 @@ pub struct Pool {
     path: PathBuf,
     jobs: Vec<Job>,
     seen: HashSet<(Hash, u64, u32, u32)>,
+    /// The chain tip as last seen, the one before it, and when it changed (for the stale-share grace).
+    tip: Hash,
+    prev_tip: Hash,
+    tip_since: u64,
+    /// Shares that failed the expensive check, per client address: (count, start of the count window), and
+    /// addresses refused until a time. A share meeting the share target costs a forger only hashing, the
+    /// check a row recomputation, so this bounds the work a forger can make the pool do.
+    invalid: HashMap<IpAddr, (u32, u64)>,
+    refused: HashMap<IpAddr, u64>,
     /// Recent shares: (payee, time, worker).
     window: VecDeque<(Hash, u64, String)>,
     miners: HashMap<Hash, MinerStats>,
@@ -134,6 +157,11 @@ impl Pool {
             path,
             jobs: Vec::new(),
             seen: HashSet::new(),
+            tip: [0; 32],
+            prev_tip: [0; 32],
+            tip_since: 0,
+            invalid: HashMap::new(),
+            refused: HashMap::new(),
             window: VecDeque::new(),
             miners: HashMap::new(),
             workers: HashMap::new(),
@@ -145,6 +173,24 @@ impl Pool {
         };
         p.load();
         p
+    }
+
+    fn refused(&self, ip: &IpAddr) -> bool {
+        self.refused.get(ip).is_some_and(|&until| until > now())
+    }
+
+    fn note_invalid(&mut self, ip: IpAddr) {
+        let t = now();
+        let e = self.invalid.entry(ip).or_insert((0, t));
+        if t.saturating_sub(e.1) > INVALID_WINDOW {
+            *e = (0, t);
+        }
+        e.0 += 1;
+        if e.0 >= INVALID_LIMIT {
+            self.invalid.remove(&ip);
+            self.refused.insert(ip, t + REFUSE_SECS);
+            eprintln!("pool: refusing {ip} for {REFUSE_SECS} s after {INVALID_LIMIT} invalid shares");
+        }
     }
 
     fn share_target(&self, network: &U256) -> U256 {
@@ -163,7 +209,9 @@ impl Pool {
             "immature": self.immature.iter().map(|c| json!({"block": hex(&c.block), "height": c.height,
                 "credits": c.credits.iter().map(|(m, a)| json!([hex(m), a])).collect::<Vec<_>>()})).collect::<Vec<_>>(),
             "found": self.found.iter().map(|f| json!([f.height, hex(&f.id), f.time, hex(&f.finder), f.reward, f.status])).collect::<Vec<_>>(),
-            "payouts": self.payouts.iter().map(|p| json!([hex(&p.txid), p.time, p.total, p.outputs])).collect::<Vec<_>>(),
+            "payouts": self.payouts.iter().map(|p| json!([hex(&p.txid), p.time, p.total, p.outputs, p.status,
+                p.paid.iter().map(|(m, a)| json!([hex(m), a])).collect::<Vec<_>>(),
+                p.tx.as_ref().filter(|_| p.status == "pending").map(|t| hex(&t.encode()))])).collect::<Vec<_>>(),
             "last_payout": self.last_payout,
         });
         let tmp = self.path.with_extension("tmp");
@@ -229,7 +277,15 @@ impl Pool {
             if let (Some(txid), Some(time), Some(total), Some(outputs)) =
                 (h32(&p[0]), p[1].as_u64(), p[2].as_u64(), p[3].as_u64())
             {
-                self.payouts.push(Payout { txid, time, total, outputs: outputs as usize });
+                let status = match p[4].as_str() {
+                    Some("pending") => "pending",
+                    Some("returned") => "returned",
+                    _ => "confirmed",
+                };
+                let paid =
+                    p[5].as_array().into_iter().flatten().filter_map(|x| Some((h32(&x[0])?, x[1].as_u64()?))).collect();
+                let tx = p[6].as_str().and_then(|s| unhex(s).ok()).and_then(|b| Tx::decode_exact(&b).ok());
+                self.payouts.push(Payout { txid, time, total, outputs: outputs as usize, paid, status, tx });
             }
         }
         self.last_payout = v["last_payout"].as_u64().unwrap_or(self.last_payout);
@@ -261,15 +317,26 @@ fn with_pool<R>(st: &mut State, f: impl FnOnce(&mut State, &mut Pool) -> R) -> O
     Some(r)
 }
 
+/// Notice a new chain tip: jobs on the previous tip stay for `STALE_GRACE` seconds, older ones go.
+fn observe_tip(st: &State, pool: &mut Pool) {
+    let tip = st.chain.tip();
+    if tip == pool.tip {
+        return;
+    }
+    pool.prev_tip = std::mem::replace(&mut pool.tip, tip);
+    pool.tip_since = now();
+    let prev = pool.prev_tip;
+    pool.jobs.retain(|j| j.tip == prev);
+    let jobs = &pool.jobs;
+    pool.seen.retain(|(d, ..)| jobs.iter().any(|j| j.digest == *d));
+}
+
 /// The current job, refreshed on a new tip or after `JOB_REFRESH` seconds.
 fn current_job(st: &mut State, pool: &mut Pool) -> usize {
+    observe_tip(st, pool);
     let tip = st.chain.tip();
     let fresh = pool.jobs.last().is_some_and(|j| j.tip == tip && now().saturating_sub(j.created) < JOB_REFRESH);
     if !fresh {
-        if pool.jobs.last().is_some_and(|j| j.tip != tip) {
-            pool.jobs.clear();
-            pool.seen.clear();
-        }
         let (block, seed) = st.new_work(&pool.owner);
         let digest = block.header.digest(&st.chain.net.chain_id);
         let share_target = pool.share_target(&block.header.target);
@@ -318,12 +385,24 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
         })
     };
 
+    let ip = crate::rpc::client_ip();
     // 1. cheap checks under the lock
-    let (epoch, threads, block, share_target, net) = {
+    let (epoch, threads, block, share_target, net, late) = {
         let mut st = shared.lock().unwrap();
         let tip = st.chain.tip();
         let r = with_pool(&mut st, |st, pool| -> Result<_, &'static str> {
-            let j = pool.jobs.iter().find(|j| j.digest == digest && j.tip == tip).ok_or("stale")?;
+            if ip.is_some_and(|ip| pool.refused(&ip)) {
+                return Err("too many invalid shares from this address; try again later");
+            }
+            observe_tip(st, pool);
+            // a share for the previous tip, found while the news travelled, still counts (not as a block)
+            let in_grace = now().saturating_sub(pool.tip_since) <= STALE_GRACE;
+            let j = pool
+                .jobs
+                .iter()
+                .find(|j| j.digest == digest && (j.tip == tip || (j.tip == pool.prev_tip && in_grace)))
+                .ok_or("stale")?;
+            let late = j.tip != tip;
             if piece.len() != st.chain.net.tnet.w {
                 return Err("piece length");
             }
@@ -335,7 +414,7 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
                 return Err("duplicate");
             }
             let (block, share_target, seed) = (j.block.clone(), j.share_target, j.seed);
-            Ok((st.chain.epoch(&seed), st.headers.threads(), block, share_target, st.chain.net.clone()))
+            Ok((st.chain.epoch(&seed), st.headers.threads(), block, share_target, st.chain.net.clone(), late))
         })
         .ok_or("pool disabled")?;
         match r {
@@ -352,6 +431,9 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
     let mut st = shared.lock().unwrap();
     if !valid {
         reject(&mut st);
+        if let Some(ip) = ip {
+            with_pool(&mut st, |_, pool| pool.note_invalid(ip));
+        }
         return Ok(json!({"accepted": false, "reason": "invalid share"}));
     }
     let t = now();
@@ -366,7 +448,7 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
         }
     });
     let h = tnet::ticket_hash(&piece, &digest, nonce, i, c);
-    let is_block = tnet::meets_target(&h, &block.header.target.to_be_bytes());
+    let is_block = !late && tnet::meets_target(&h, &block.header.target.to_be_bytes());
     let mut height = None;
     if is_block {
         let mut b = block;
@@ -431,6 +513,13 @@ fn maintain(st: &mut State, pool: &mut Pool) {
         changed = true;
     }
     pool.immature = keep;
+    let t = now();
+    let devices = pool.workers.len();
+    pool.workers.retain(|_, s| t.saturating_sub(s.last) <= DEVICE_KEPT);
+    changed |= pool.workers.len() != devices;
+    pool.refused.retain(|_, until| *until > t);
+    pool.invalid.retain(|_, (_, since)| t.saturating_sub(*since) <= INVALID_WINDOW);
+    changed |= track_payouts(st, pool);
 
     if now().saturating_sub(pool.last_payout) >= pool.cfg.payout_every {
         pool.last_payout = now();
@@ -439,6 +528,45 @@ fn maintain(st: &mut State, pool: &mut Pool) {
     if changed {
         pool.save();
     }
+}
+
+/// Follow pending payouts: confirmed once in a block; sent again if the mempool lost them while their coins
+/// are unspent; returned to the balances only when a coin they spend was spent by another transaction (then
+/// they can never confirm, so nobody is paid twice).
+fn track_payouts(st: &mut State, pool: &mut Pool) -> bool {
+    let mut changed = false;
+    for k in 0..pool.payouts.len() {
+        let p = &pool.payouts[k];
+        if p.status != "pending" || st.mempool.contains(&p.txid) {
+            continue;
+        }
+        if st.index.locate(&p.txid).is_some() {
+            pool.payouts[k].status = "confirmed";
+            pool.payouts[k].tx = None;
+            changed = true;
+            continue;
+        }
+        let Some(tx) = p.tx.clone() else { continue };
+        let Tx::Transfer { inputs, .. } = &tx else { continue };
+        if inputs.iter().all(|i| st.chain.coin(&i.prev).is_some()) {
+            if let Err(e) = st.process_tx(tx, None) {
+                eprintln!("pool: payout {} could not be sent again: {e}", hex(&pool.payouts[k].txid));
+            }
+            continue;
+        }
+        let p = &mut pool.payouts[k];
+        for (m, a) in &p.paid {
+            *pool.balances.entry(*m).or_default() += a;
+            if let Some(s) = pool.miners.get_mut(m) {
+                s.paid = s.paid.saturating_sub(*a);
+            }
+        }
+        eprintln!("pool: payout {} can no longer confirm; balances restored", hex(&p.txid));
+        p.status = "returned";
+        p.tx = None;
+        changed = true;
+    }
+    changed
 }
 
 /// One payout transaction to every miner whose balance reached the minimum (as many as the pool's
@@ -495,7 +623,7 @@ fn payout(st: &mut State, pool: &mut Pool) -> bool {
     let keys: Vec<&SigningKey> = inputs.iter().map(|_| &pool.key).collect();
     let mut tx = Tx::Transfer { inputs, outputs };
     tx.sign(&st.chain.net.chain_id, &keys);
-    match st.process_tx(tx, None) {
+    match st.process_tx(tx.clone(), None) {
         Ok(txid) => {
             for o in &paid {
                 if let Some(b) = pool.balances.get_mut(&o.pkh) {
@@ -504,7 +632,15 @@ fn payout(st: &mut State, pool: &mut Pool) -> bool {
                 pool.miners.entry(o.pkh).or_default().paid += o.value;
             }
             pool.balances.retain(|_, a| *a > 0);
-            pool.payouts.push(Payout { txid, time: now(), total, outputs: paid.len() });
+            pool.payouts.push(Payout {
+                txid,
+                time: now(),
+                total,
+                outputs: paid.len(),
+                paid: paid.iter().map(|o| (o.pkh, o.value)).collect(),
+                status: "pending",
+                tx: Some(tx),
+            });
             true
         }
         Err(e) => {
@@ -547,18 +683,13 @@ pub fn stats(st: &State) -> Option<Value> {
         .miners
         .iter()
         .map(|(m, s)| {
-            // an address's counts are the sums over its devices, so the rows always add up (shares sent before
-            // devices were tracked are left out); devices silent for a day are not listed
+            // an address's counts are the sums over its active devices (see DEVICE_KEPT), so the rows add up
             let mine: Vec<(&String, &MinerStats)> =
                 pool.workers.iter().filter(|((wm, _), _)| wm == m).map(|((_, w), ws)| (w, ws)).collect();
-            let (shares, rejected, last) = if mine.is_empty() {
-                (s.shares, s.rejected, s.last)
-            } else {
-                mine.iter().fold((0, 0, 0), |(n, r, l), (_, ws)| (n + ws.shares, r + ws.rejected, l.max(ws.last)))
-            };
+            let (shares, rejected, last) =
+                mine.iter().fold((0, 0, s.last), |(n, r, l), (_, ws)| (n + ws.shares, r + ws.rejected, l.max(ws.last)));
             let mut workers: Vec<Value> = mine
                 .iter()
-                .filter(|(_, ws)| t.saturating_sub(ws.last) <= DEVICE_LISTED)
                 .map(|(w, ws)| {
                     json!({"name": w, "tickets_per_s": rate(recent_w.get(&(*m, w.as_str()))),
                            "shares": ws.shares, "rejected": ws.rejected, "last_share": ws.last})
@@ -586,7 +717,7 @@ pub fn stats(st: &State) -> Option<Value> {
         "blocks": pool.found.iter().rev().take(50).map(|f| json!({"height": f.height, "id": hex(&f.id), "time": f.time,
             "finder": address(net, &f.finder), "reward": f.reward, "status": f.status})).collect::<Vec<_>>(),
         "payouts": pool.payouts.iter().rev().take(50).map(|p| json!({"txid": hex(&p.txid), "time": p.time,
-            "total": p.total, "outputs": p.outputs})).collect::<Vec<_>>(),
+            "total": p.total, "outputs": p.outputs, "status": p.status})).collect::<Vec<_>>(),
     }))
 }
 

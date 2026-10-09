@@ -7,7 +7,7 @@ use requant_consensus::block::Claim;
 use requant_consensus::tx::{Hash, Tx};
 use serde_json::{json, Value};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 
@@ -68,6 +68,15 @@ pub fn serve_with(
     Ok(local)
 }
 
+thread_local! {
+    static CLIENT: std::cell::Cell<Option<IpAddr>> = const { std::cell::Cell::new(None) };
+}
+
+/// Address of the client whose request the current thread is answering (each request has its own thread).
+pub fn client_ip() -> Option<IpAddr> {
+    CLIENT.with(|c| c.get())
+}
+
 /// Constant-time comparison for the token.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
@@ -75,6 +84,7 @@ fn same(a: &str, b: &str) -> bool {
 
 fn handle(stream: TcpStream, token: Option<String>, max_body: usize, handler: &Handler) -> io::Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
+    CLIENT.with(|c| c.set(stream.peer_addr().ok().map(|a| a.ip())));
     let mut reader = BufReader::new(stream.try_clone()?);
     let (mut len, mut auth) = (0usize, None::<String>);
     let mut line = String::new();
