@@ -1,0 +1,17 @@
+[package]
+name = "requant-wallet"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Requant wallet: keys, bech32m addresses, balance and payments through a node."
+
+[dependencies]
+requant-consensus = { path = "../consensus" }
+requant-node = { path = "../node" }
+ed25519-dalek = "=2.2.0"
+getrandom = "=0.2.15"
+serde_json = "=1.0.140"
+
+[[bin]]
+name = "requant-wallet"
+path = "src/main.rs"

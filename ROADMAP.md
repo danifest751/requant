@@ -38,7 +38,9 @@ test network.
       `crates/node` (`requantd`).
 - [x] Mempool (no chains of unconfirmed transactions yet) and JSON-RPC (`getinfo`, `getblock`,
       `getwork`/`submitwork`, `sendtx`, `utxos`, `addpeer`, `peers`).
-- [ ] Wallet CLI: key generation, addresses, balance, send.
+- [x] Wallet CLI (`requant-wallet`): key generation from the OS RNG, bech32m addresses (`rq1`, `trq1`,
+      `rqrt1`), balance, send. Next: spending unconfirmed change, several payments per block, encrypted
+      key files, hardware wallets.
 - [ ] Headers-first sync; peer discovery and address gossip; persistent ban list.
 - [ ] Deep-fork protection: a low-difficulty fork far below the tip costs little work and, at an epoch
       boundary, a weight derivation (7 s); limit reorg depth or require minimum chain work.

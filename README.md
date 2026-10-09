@@ -48,6 +48,9 @@ cargo run --release --bin requantd -- --network regtest --mine <32-byte key hash
 curl -s -X POST 127.0.0.1:19445 -d '{"method":"getinfo","params":[]}'
 ```
 
+Wallet: `requant-wallet keygen my.key`, then `--mine <key hash>` on the node, `requant-wallet balance <address>`,
+`requant-wallet send my.key <address> 1.5`.
+
 ## Layout
 
 ```
@@ -55,6 +58,7 @@ SPEC.md          TNet v1 work function (normative)
 crates/tnet/     Rust reference: derivations, verifier (Epoch), CLI (vectors, check, bench)
 crates/consensus/ chain rules of CHAIN.md: transactions, blocks, difficulty, emission, chain state
 crates/node/     requantd: storage, peer-to-peer sync and relay, mempool, JSON-RPC, regtest miner
+crates/wallet/   requant-wallet: keys, bech32m addresses, balance, payments through a node
 reference/       pure-Python reference written from SPEC.md
 vectors/         frozen test vectors
 miner/cuda/      GPU attempt benchmark, the starting point of the miner
