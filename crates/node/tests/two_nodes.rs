@@ -23,6 +23,10 @@ fn datadir(tag: &str) -> PathBuf {
 }
 
 fn node(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>) -> Handle {
+    node_with(dir, connect, mine_to, requant_node::release::RELEASE_KEY)
+}
+
+fn node_with(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>, release_key: [u8; 32]) -> Handle {
     start(Config {
         net: Network::regtest(),
         datadir: dir.to_path_buf(),
@@ -38,6 +42,8 @@ fn node(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>) -> Handle {
         discover: true,
         explorer: None,
         pool: None,
+        auto_update: false,
+        release_key,
     })
     .unwrap()
 }
@@ -299,6 +305,8 @@ fn headers_first_sync_from_two_peers() {
         discover: false,
         explorer: None,
         pool: None,
+        auto_update: false,
+        release_key: requant_node::release::RELEASE_KEY,
     })
     .unwrap();
     wait("a to mine 150 blocks", 120, || height(&a) >= 150);
@@ -316,4 +324,44 @@ fn headers_first_sync_from_two_peers() {
     } // release c's lock before asking c over RPC
     let info = request(c.rpc.unwrap(), "getinfo", json!([])).unwrap();
     assert_eq!(info["headers"], height(&a));
+}
+
+#[test]
+fn signed_releases_spread_and_persist() {
+    use ed25519_dalek::Signer;
+    let key = SigningKey::from_bytes(&[0x77; 32]);
+    let pk = key.verifying_key().to_bytes();
+    let manifest = |v: &str| {
+        let text = format!(
+            "requant-release 1
+version {v}
+asset linux-x86_64 {} https://example.org/requantd
+",
+            "00".repeat(32)
+        );
+        let sig = hex(&key.sign(&requant_node::release::signed_message(&text)).to_bytes());
+        (text, sig)
+    };
+    let (da, db) = (datadir("rel-a"), datadir("rel-b"));
+    let a = node_with(&da, vec![], None, pk);
+    let b = node_with(&db, vec![a.p2p.to_string()], None, pk);
+    wait("b to connect", 30, || b.shared.lock().unwrap().peer_count() > 0);
+    let (text, sig) = manifest("99.0.0");
+    let r = request(a.rpc.unwrap(), "submitrelease", json!([text, sig])).unwrap();
+    assert_eq!(r["new"], true);
+    wait("the release to reach b", 30, || {
+        request(b.rpc.unwrap(), "getrelease", json!([])).unwrap()["version"] == "99.0.0"
+    });
+    let info = request(b.rpc.unwrap(), "getinfo", json!([])).unwrap();
+    assert_eq!(info["update_available"], "99.0.0");
+    // an older release is not taken; a forged signature is refused
+    let (old, old_sig) = manifest("98.0.0");
+    assert_eq!(request(a.rpc.unwrap(), "submitrelease", json!([old, old_sig])).unwrap()["new"], false);
+    let (t2, _) = manifest("100.0.0");
+    assert!(request(a.rpc.unwrap(), "submitrelease", json!([t2, sig])).is_err());
+    // kept across a restart
+    b.stop.store(true, Ordering::Relaxed);
+    drop(b);
+    let b2 = node_with(&db, vec![], None, pk);
+    assert_eq!(request(b2.rpc.unwrap(), "getrelease", json!([])).unwrap()["version"], "99.0.0");
 }

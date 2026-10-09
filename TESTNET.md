@@ -22,8 +22,17 @@ target/release/requantd --network test --datadir ~/requant-test \
 curl -s -X POST 127.0.0.1:19334 -d '{"method":"getinfo","params":[]}'
 ```
 
-The node needs about 1 GiB of memory (two epochs of TNet weights) and verifies a block in 10–80 ms on
-a laptop or VPS CPU. JSON-RPC listens on `127.0.0.1:19334` only.
+The node keeps the TNet weights of the current epoch (512 MiB) in a file under its data directory and
+reads them through the operating system's cache, so its own memory stays small (a few MB; the cache is
+given back when other programs need it). A block is verified in about 0.1 s. JSON-RPC listens on
+`127.0.0.1:19334` only.
+
+**Updates.** Releases are signed with the Requant release key, built into the node. Nodes pass the newest
+signed release to each other; `getinfo` shows `update_available` and the log says so. Started with
+`--auto-update`, a node installs it by itself: at a random moment within 30 minutes it downloads its
+platform's binary from the GitHub release, checks the signed SHA-256 and the version the binary reports,
+replaces its executable and exits for its service (systemd, or the loop in `start-node.bat`) to start the
+new one. It never installs a version older than its own. Without the flag nothing is downloaded.
 
 ## Wallet
 

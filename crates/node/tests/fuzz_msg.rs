@@ -26,7 +26,7 @@ fn message_decoder_never_panics() {
             tip: [1; 32],
             node_id: 5,
             listen_port: 19333,
-            agent: "requantd/0.5.0".into(),
+            agent: "requantd/0.7.0".into(),
         },
         Msg::GetBlocks(vec![[2; 32]; 3]),
         Msg::Inv(vec![[3; 32]; 4]),

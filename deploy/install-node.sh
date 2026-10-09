@@ -1,6 +1,7 @@
 #!/bin/bash
 # Install or upgrade a Requant node as a confined systemd service (run as root on the target host).
-# usage: [EXPLORER_PORT=19380] [POOL_PORT=19340 POOL_ARGS="..."] install-node.sh THREADS [PEER_IP ...]     with the new binary uploaded to /tmp/requantd first
+# usage: [EXPLORER_PORT=19380] [POOL_PORT=19340 POOL_ARGS="..."] [AUTO_UPDATE=1] install-node.sh THREADS [PEER_IP ...]
+#        with the new binary uploaded to /tmp/requantd first
 # Data in /var/lib/requant survives upgrades; the service restarts on the new binary.
 set -e
 THREADS=$1; shift
@@ -9,6 +10,9 @@ for p in "$@"; do CONNECT="$CONNECT --connect $p:19333"; done
 # optional: EXPLORER_PORT=19380 serves the read-only block explorer on that public port
 EXTRA=""
 [ -n "$EXPLORER_PORT" ] && EXTRA=" --explorer 0.0.0.0:$EXPLORER_PORT"
+# optional: AUTO_UPDATE=1 installs newer releases signed with the Requant release key by itself (the node
+# then owns /opt/requant to replace its binary; see crates/node/src/release.rs)
+[ "$AUTO_UPDATE" = 1 ] && EXTRA="$EXTRA --auto-update"
 # optional: POOL_PORT=19340 runs the mining pool there (pool wallet key created once in /var/lib/requant)
 # with POOL_ARGS for --pool-fee, --pool-share-bits, --pool-min-payout
 if [ -n "$POOL_PORT" ]; then
@@ -22,8 +26,15 @@ fi
 
 id requant >/dev/null 2>&1 || useradd --system --home-dir /var/lib/requant --shell /usr/sbin/nologin requant
 install -d -o requant -g requant -m 750 /var/lib/requant
-install -d -m 755 /opt/requant
-install -m 755 /tmp/requantd /opt/requant/requantd
+if [ "$AUTO_UPDATE" = 1 ]; then
+  install -d -o requant -g requant -m 755 /opt/requant
+  install -o requant -g requant -m 755 /tmp/requantd /opt/requant/requantd
+  RW="/var/lib/requant /opt/requant"
+else
+  install -d -m 755 /opt/requant
+  install -m 755 /tmp/requantd /opt/requant/requantd
+  RW="/var/lib/requant"
+fi
 rm -f /tmp/requantd
 
 cat > /etc/systemd/system/requantd.service <<EOF
@@ -44,7 +55,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/var/lib/requant
+ReadWritePaths=$RW
 
 [Install]
 WantedBy=multi-user.target

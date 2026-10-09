@@ -154,6 +154,8 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "headers": st.headers.height(),
                 "tip": hex(&st.chain.tip()),
                 "chainwork": hex(&st.chain.tip_work().to_be_bytes()),
+                "update_available": st.release.as_ref().filter(|r| r.version > crate::release::own_version())
+                    .map(|r| r.version_string()),
                 "issued_atoms": st.chain.issued(),
                 "peers": peers.len(),
                 "outbound": outbound,
@@ -163,6 +165,27 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "indexed_txs": st.index.tx_count(),
                 "uptime_s": now().saturating_sub(st.started),
             }))
+        }
+        // the newest signed release this node knows, and whether it is newer than this node
+        "getrelease" => Ok(match &st.release {
+            Some(r) => json!({"version": r.version_string(), "newer": r.version > crate::release::own_version(),
+                "manifest": r.text, "signature": hex(&r.sig), "platform": crate::release::platform(),
+                "auto_update": st.auto_update}),
+            None => json!(null),
+        }),
+        // publish a signed release manifest: verified, kept, passed to every peer
+        "submitrelease" => {
+            let text = arg(0)?.as_str().ok_or("manifest text expected")?;
+            let sig: [u8; 64] = unhex(arg(1)?.as_str().ok_or("signature hex expected")?)?
+                .try_into()
+                .map_err(|_| "signature must be 64 bytes")?;
+            let r = crate::release::Release::verify_with(text, &sig, &st.release_key).map_err(|e| e.to_string())?;
+            let version = r.version_string();
+            let new = st.take_release(r);
+            if new {
+                st.relay_release(None);
+            }
+            Ok(json!({"version": version, "new": new}))
         }
         "getblock" => {
             let h = u64_param(arg(0)?)?;

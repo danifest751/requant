@@ -17,7 +17,7 @@ fn main() {
     let (mut datadir, mut listen, mut rpc) = ("requant-data".to_string(), None, None);
     let (mut connect, mut mine_to, mut interval, mut threads) = (Vec::new(), None, 1000u64, 4usize);
     let mut max_reorg = None::<u64>;
-    let (mut rpc_token, mut discover) = (None::<String>, true);
+    let (mut rpc_token, mut discover, mut auto_update) = (None::<String>, true, false);
     let mut explorer = None;
     let (mut pool_addr, mut pool_key, mut pool_fee, mut share_bits) = (None, None::<[u8; 32]>, 1.0f64, 24u32);
     let (mut min_payout, mut payout_every) = (100_000_000u64, 600u64);
@@ -83,6 +83,11 @@ fn main() {
                 k += 1;
                 continue;
             }
+            "--auto-update" => {
+                auto_update = true;
+                k += 1;
+                continue;
+            }
             "--version" => {
                 println!("{}", agent());
                 return;
@@ -118,6 +123,8 @@ fn main() {
             min_payout,
             payout_every,
         }),
+        auto_update,
+        release_key: requant_node::release::RELEASE_KEY,
     };
     let net_name = cfg.net.name;
     match start(cfg) {
@@ -143,7 +150,7 @@ fn usage(msg: &str) -> ! {
     eprintln!(
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
          \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
-\n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--version]"
+\n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--auto-update] [--version]"
     );
     std::process::exit(2)
 }

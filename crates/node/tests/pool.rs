@@ -85,6 +85,8 @@ fn pool_shares_blocks_and_payouts() {
             min_payout: 100_000_000,
             payout_every: 1,
         }),
+        auto_update: false,
+        release_key: requant_node::release::RELEASE_KEY,
     })
     .unwrap();
     // the pool's address comes from the pool server's port: read it from the node log-free way

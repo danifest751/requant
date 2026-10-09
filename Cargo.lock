@@ -316,7 +316,7 @@ dependencies = [
 
 [[package]]
 name = "requant-node"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "ed25519-dalek",
  "requant-consensus",

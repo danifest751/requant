@@ -9,5 +9,6 @@ pub mod mempool;
 pub mod msg;
 pub mod node;
 pub mod pool;
+pub mod release;
 pub mod rpc;
 pub mod store;

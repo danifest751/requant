@@ -10,8 +10,10 @@ use tnet::sha256::sha256;
 /// Protocol 2: `Hello` carries a node id, the listening port and a user agent (later fields may follow and
 /// are ignored); `GetAddr`/`Addr` exchange peer addresses.
 /// Protocol 3 adds headers-first sync (`GetHeaders`/`Headers`); peers below 3 are synced block by block.
-pub const PROTOCOL: u32 = 3;
+/// Protocol 4 adds `Release` (signed release announcements, see `release`); only sent to peers at 4 or above.
+pub const PROTOCOL: u32 = 4;
 pub const HEADERS_PROTOCOL: u32 = 3;
+pub const RELEASE_PROTOCOL: u32 = 4;
 pub const MAX_HEADERS: usize = 2000;
 pub const MIN_PROTOCOL: u32 = 2;
 pub const MAX_ADDR: usize = 100;
@@ -42,13 +44,15 @@ pub enum Msg {
     GetHeaders(Vec<Hash>),
     /// `varint n || (header || claim)*`, decoded by the node (the claim size depends on the network).
     Headers(Vec<u8>),
+    /// A signed release manifest (`release::Release::encode`).
+    Release(Vec<u8>),
 }
 
 impl Msg {
     /// Approximate encoded size, for bounding what is queued for a peer.
     pub fn approx_size(&self) -> usize {
         16 + match self {
-            Msg::Block(b) | Msg::Tx(b) | Msg::Headers(b) => b.len(),
+            Msg::Block(b) | Msg::Tx(b) | Msg::Headers(b) | Msg::Release(b) => b.len(),
             Msg::GetBlocks(v) | Msg::Inv(v) | Msg::GetData(v) | Msg::GetHeaders(v) => 32 * v.len(),
             Msg::Addr(v) => 19 * v.len(),
             Msg::Hello { agent, .. } => 64 + agent.len(),
@@ -119,6 +123,10 @@ impl Msg {
                 w.raw(b);
                 11
             }
+            Msg::Release(b) => {
+                w.raw(b);
+                12
+            }
             Msg::Addr(v) => {
                 w.varint(v.len() as u64);
                 for a in v {
@@ -165,6 +173,7 @@ impl Msg {
             8 => Msg::GetAddr,
             10 => Msg::GetHeaders(read_hashes(&mut r, MAX_LOCATOR)?),
             11 => return Ok(Msg::Headers(p.to_vec())),
+            12 if p.len() <= 2 + crate::release::MAX_RELEASE_TEXT + 64 => return Ok(Msg::Release(p.to_vec())),
             9 => {
                 let n = r.varint(MAX_ADDR as u64)?;
                 let mut v = Vec::with_capacity(n as usize);

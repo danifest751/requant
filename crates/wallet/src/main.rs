@@ -158,6 +158,17 @@ fn main() {
             let key = load_key(path);
             println!("address  {}", address(&net, &owner_of(&key)));
             println!("key hash {}", hex(&owner_of(&key)));
+            println!("pubkey   {}", hex(&key.verifying_key().to_bytes()));
+        }
+        // release signing (maintainers): the signature of a release manifest, checked by the manifest parser
+        ["sign-release", path, manifest] => {
+            use ed25519_dalek::Signer;
+            let key = load_key(path);
+            let text = std::fs::read_to_string(manifest).unwrap_or_else(|e| die(&format!("{manifest}: {e}")));
+            let sig = key.sign(&requant_node::release::signed_message(&text)).to_bytes();
+            requant_node::release::Release::verify_with(&text, &sig, &key.verifying_key().to_bytes())
+                .unwrap_or_else(|e| die(e));
+            println!("{}", hex(&sig));
         }
         ["balance", addr] => {
             let owner = owner_arg(&net, addr);

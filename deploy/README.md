@@ -26,6 +26,21 @@ Blocks in `/var/lib/requant` are kept; on start the node replays them without re
 
 Check a node: `journalctl -u requantd -f`, `curl -s -X POST 127.0.0.1:19334 -d '{"method":"getinfo","params":[]}'`.
 
+With `AUTO_UPDATE=1` the node runs with `--auto-update` and owns `/opt/requant`, so it can replace its
+binary with a newer signed release (see `TESTNET.md`, Updates).
+
+## Publish a release (maintainers)
+
+```sh
+python scripts/release.py 0.7.1 --linux requantd --windows requantd.exe --key ~/key/requant-release.key --publish
+curl -s -X POST 127.0.0.1:19334 -d "{\"method\":\"submitrelease\",\"params\":[$(python -c 'import json;print(json.dumps(open("release-0.7.1.txt").read()))'), \"$(cat release-0.7.1.sig)\"]}"
+```
+
+The script writes the manifest (binary hashes and download URLs), signs it with the release key and
+creates the GitHub release. `submitrelease` on any node announces it; peers spread it within seconds and
+`--auto-update` nodes install it over the next 30 minutes. Keep the release key offline: whoever holds
+it can update every `--auto-update` node.
+
 ## Compatibility
 
 - **Protocol** (`crates/node/src/msg.rs`): nodes refuse peers below `MIN_PROTOCOL`. `Hello` ignores fields it

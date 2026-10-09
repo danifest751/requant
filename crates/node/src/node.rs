@@ -5,7 +5,10 @@
 use crate::addrbook::{routable, AddrBook};
 use crate::index::TxIndex;
 use crate::mempool::Mempool;
-use crate::msg::{read_msg, write_msg, Msg, HEADERS_PROTOCOL, MAX_ADDR, MAX_HEADERS, MAX_INV, MIN_PROTOCOL, PROTOCOL};
+use crate::msg::{
+    read_msg, write_msg, Msg, HEADERS_PROTOCOL, MAX_ADDR, MAX_HEADERS, MAX_INV, MIN_PROTOCOL, PROTOCOL,
+    RELEASE_PROTOCOL,
+};
 use crate::store::Store;
 use requant_consensus::block::tx_root;
 use requant_consensus::block::Block;
@@ -55,7 +58,7 @@ pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-fn random_u64() -> u64 {
+pub fn random_u64() -> u64 {
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u64(now());
     h.finish()
@@ -90,6 +93,10 @@ pub struct Config {
     pub explorer: Option<SocketAddr>,
     /// Run a mining pool.
     pub pool: Option<crate::pool::PoolConfig>,
+    /// Install newer signed releases automatically (see `release`).
+    pub auto_update: bool,
+    /// Key releases must be signed with (`release::RELEASE_KEY`; tests use their own).
+    pub release_key: [u8; 32],
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -158,6 +165,11 @@ pub struct State {
     bans_path: PathBuf,
     /// Where epoch weights files live (see `epochs`).
     epoch_dir: PathBuf,
+    /// The newest verified release (see `release`), kept in `release_path`.
+    pub release: Option<crate::release::Release>,
+    release_path: PathBuf,
+    pub auto_update: bool,
+    pub release_key: [u8; 32],
     allow_local: bool,
     pub started: u64,
     pub pool: Option<crate::pool::Pool>,
@@ -465,6 +477,36 @@ impl State {
         }
     }
 
+    /// Keep a verified release if it is newer than the one known; returns whether it was (to relay it).
+    pub fn take_release(&mut self, r: crate::release::Release) -> bool {
+        if self.release.as_ref().is_some_and(|have| have.version >= r.version) {
+            return false;
+        }
+        if r.version > crate::release::own_version() {
+            eprintln!(
+                "update available: requantd {} (this node runs {VERSION}){}",
+                r.version_string(),
+                if self.auto_update { "; it will update itself" } else { "" }
+            );
+        }
+        if let Err(e) = std::fs::write(&self.release_path, r.encode()) {
+            eprintln!("release: {e}");
+        }
+        self.release = Some(r);
+        true
+    }
+
+    /// Pass the known release to peers that understand it.
+    pub fn relay_release(&self, except: Option<u64>) {
+        let Some(r) = &self.release else { return };
+        let m = Msg::Release(r.encode());
+        for (id, p) in &self.peers {
+            if Some(*id) != except && p.protocol >= RELEASE_PROTOCOL {
+                p.deliver(m.clone());
+            }
+        }
+    }
+
     fn on_message(&mut self, peer: u64, m: Msg) -> Result<(), &'static str> {
         match m {
             Msg::Hello { protocol, height, tip, node_id, listen_port, agent } => {
@@ -495,6 +537,11 @@ impl State {
                     self.book.add(l);
                 }
                 self.send(peer, Msg::GetAddr);
+                if protocol >= RELEASE_PROTOCOL {
+                    if let Some(r) = &self.release {
+                        self.send(peer, Msg::Release(r.encode()));
+                    }
+                }
                 if protocol >= HEADERS_PROTOCOL {
                     if height > self.headers.height() || !self.headers.contains(&tip) {
                         self.send(peer, Msg::GetHeaders(self.headers.locator()));
@@ -589,6 +636,12 @@ impl State {
                         return Err("invalid transaction")
                     }
                     _ => {}
+                }
+            }
+            Msg::Release(bytes) => {
+                let r = crate::release::Release::decode(&bytes, &self.release_key).map_err(|_| "invalid release")?;
+                if self.take_release(r) {
+                    self.relay_release(Some(peer));
                 }
             }
             Msg::Ping(n) => self.send(peer, Msg::Pong(n)),
@@ -805,6 +858,10 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         started: now(),
         pool: cfg.pool.clone().map(|p| crate::pool::Pool::new(p, dir.join("pool.json"))),
         epoch_dir: dir.join("epochs"),
+        release: crate::release::load(&dir.join("release.bin"), &cfg.release_key),
+        release_path: dir.join("release.bin"),
+        auto_update: cfg.auto_update,
+        release_key: cfg.release_key,
     };
     let shared: Shared = Arc::new(Mutex::new(state));
     let stop = Arc::new(AtomicBool::new(false));
@@ -845,6 +902,10 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     {
         let (shared, stop) = (shared.clone(), stop.clone());
         std::thread::spawn(move || epoch_preparer(shared, stop));
+    }
+    if cfg.auto_update {
+        let (shared, dir) = (shared.clone(), dir.join("update"));
+        std::thread::spawn(move || crate::release::updater(shared, dir));
     }
     if let Some(payee) = cfg.mine_to {
         let (shared, stop, interval) = (shared.clone(), stop.clone(), cfg.mine_interval);
