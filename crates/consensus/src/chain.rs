@@ -63,7 +63,8 @@ pub struct Chain {
     max_reorg: u64,
 }
 
-const EPOCH_CACHE: usize = 3;
+/// Current and next epoch (512 MiB each for TNet v1).
+const EPOCH_CACHE: usize = 2;
 
 impl Chain {
     pub fn new(net: Network, threads: usize) -> Chain {

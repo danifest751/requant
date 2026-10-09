@@ -24,10 +24,12 @@ pub const MTP_WINDOW: usize = 11;
 /// Nodes hold back blocks dated further ahead than this (not a consensus rule).
 pub const MAX_FUTURE_SECS: u64 = 7200;
 
-/// Test network genesis time: to be set to the launch time before the test network starts, since ASERT
-/// is anchored at genesis (a genesis time far in the past would allow easy blocks until the schedule
-/// catches up).
-pub const TEST_GENESIS_TIME: u64 = 1_791_504_000;
+/// Test network launch time. ASERT is anchored at genesis, so this must be the launch moment: a time in
+/// the past lets easy blocks through until the height catches up with the schedule.
+pub const TEST_GENESIS_TIME: u64 = 1_791_567_240;
+/// Test network starting target, `2^229`: about `2^27` tickets per block, one minute on a Turing GPU
+/// (3 M tickets/s), so the launch is not an instamine at the easiest target.
+pub const TEST_GENESIS_TARGET_BITS: u32 = 229;
 pub const REGTEST_GENESIS_TIME: u64 = 1_791_504_000;
 
 /// Development fund: 6% of the block reward for heights `1..=2^21` (about four years).
@@ -96,7 +98,10 @@ impl Network {
     }
 
     pub fn test() -> Self {
-        Self::make("test", tnet::V1, (1440, 60), 248, TEST_GENESIS_TIME, 100, (TEST_DEV_FUND, DEV_FUND_LAST))
+        let mut n =
+            Self::make("test", tnet::V1, (1440, 60), 248, TEST_GENESIS_TIME, 100, (TEST_DEV_FUND, DEV_FUND_LAST));
+        n.genesis_target = U256::low_mask(TEST_GENESIS_TARGET_BITS);
+        n
     }
 
     pub fn regtest() -> Self {

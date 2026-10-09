@@ -347,10 +347,9 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
             }
         });
     }
-    for addr in &cfg.connect {
-        if let Err(e) = connect(&shared, addr) {
-            eprintln!("connect {addr}: {e}");
-        }
+    for addr in cfg.connect.clone() {
+        let (shared, stop) = (shared.clone(), stop.clone());
+        std::thread::spawn(move || keep_connected(shared, addr, stop));
     }
     let rpc = match cfg.rpc {
         Some(a) => Some(crate::rpc::serve(shared.clone(), a)?),
@@ -365,6 +364,26 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         std::thread::spawn(move || cpu_miner(shared, payee, stop, interval));
     }
     Ok(Handle { shared, p2p, rpc, stop })
+}
+
+/// Stay connected to a configured peer: (re)connect whenever no connection to it is open.
+fn keep_connected(shared: Shared, addr: String, stop: Arc<AtomicBool>) {
+    let mut warned = false;
+    while !stop.load(Ordering::Relaxed) {
+        let target = addr.to_socket_addrs().ok().and_then(|mut a| a.next());
+        let connected = target.is_some_and(|t| shared.lock().unwrap().peer_addrs().contains(&t));
+        if !connected {
+            match connect(&shared, &addr) {
+                Ok(()) => warned = false,
+                Err(e) if !warned => {
+                    eprintln!("connect {addr}: {e} (retrying every 30 s)");
+                    warned = true;
+                }
+                Err(_) => {}
+            }
+        }
+        std::thread::sleep(Duration::from_secs(30));
+    }
 }
 
 /// Derive the weights of the current and the next epoch off the lock, as soon as their seeds are known,

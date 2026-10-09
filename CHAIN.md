@@ -24,7 +24,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 | ASERT half-life `tau` | 7200 s | 7200 s | 7200 s |
 | epoch length `E` / look-back `K` | 1440 / 60 | 1440 / 60 | 16 / 4 |
 | `pow_limit` (largest target) | `2^240 - 1` | `2^248 - 1` | `2^255 - 1` |
-| genesis target | set at launch | `pow_limit` | `pow_limit` |
+| genesis target | set at launch | `2^229` | `pow_limit` |
 | coinbase maturity | 100 | 100 | 2 |
 | development fund (§8) | 6%, heights 1..2^21, key set at launch | same, `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` | 6%, heights 1..8, public test key |
 
