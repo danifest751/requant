@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Rust
+target/
+
+# artifacts / research output
+artifacts/
+*.log
+
+# CUDA build output
+*.cubin
+*.ptx
+*.fatbin
+*.o
+*.obj
+*.dll
+*.so
+*.exe
+
+# editors / OS
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+
+# local indexes
+.codegraph/
+
+# local review archives
+*.zip

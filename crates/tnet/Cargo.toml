@@ -1,0 +1,8 @@
+[package]
+name = "tnet"
+version = "1.0.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "TNet v1: deep requantized int8 network proof of work (reference implementation)."
+
+[dependencies]
