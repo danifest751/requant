@@ -108,14 +108,14 @@ Values for `E`, `K`, the target encoding, block time and retargeting are open (`
 From the research record (`RATIONALE.md`):
 
 - Every ticket costs `L n w` multiply-adds whatever the miner computes; batching many rows (int8 GEMM
-  on tensor cores) is 42–45x cheaper per ticket than single rows. On a Turing GPU 88.2% of an attempt
-  is int8 tensor-core GEMM (57.5 TMAC/s).
+  on tensor cores) is 42–51x cheaper per ticket than single rows. 88.2% of an attempt is int8
+  tensor-core GEMM on a Turing GPU (292 ns per ticket), 86.7% on an RTX 3090 (159.5 ns per ticket).
 - One ±1 error after the first layer changes 55% of the final row; approximate computation yields no
   valid tickets at useful rates.
 - Table-based precomputation on the epoch weights is bounded (not measured) at 4–12x slower than
   tensor cores on the measured GPU.
 - Not established: ASIC resistance (an int8-GEMM chip is an AI inference chip), usefulness of the work,
-  behaviour on other GPU architectures.
+  behaviour on GPU generations after Ampere.
 
 ## 10. Test vectors
 

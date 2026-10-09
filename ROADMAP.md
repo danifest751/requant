@@ -5,10 +5,11 @@ decisions for the project owner, not engineering defaults.
 
 ## 0. Before any code depends on it
 
-- [ ] Measure the GPU attempt on a second architecture (e.g. RTX 3090, Ampere): parity, tensor
-      share, ns per ticket.
+- [x] Second architecture: RTX 3090 (Ampere), 159.5 ns per ticket, 86.7% tensor share, parity holds
+      (Abacus `tnet-ampere-v1`). Next: Ada / Hopper / Blackwell.
 - [ ] External review of `SPEC.md` and `crates/tnet`.
-- [ ] Coin name, ticker and repository name (**owner**).
+- [x] Coin name and repository: Requant (`danifest751/requant`); ticker RQT, provisional until checked
+      against exchanges and trademarks (**owner**).
 
 ## 1. Chain parameters
 

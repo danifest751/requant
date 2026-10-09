@@ -1,4 +1,4 @@
-# GPU attempt benchmark
+# GPU attempt benchmark (TNet v1)
 
 `tnet_bench.cu` runs complete TNet attempts on one GPU with cuBLAS int8 GEMM (tensor cores), an
 integer requantization kernel and SHA-256 ticket hashing, and reports per-phase times, the tensor-core
@@ -13,8 +13,12 @@ nvcc -O3 -arch=sm_75 tnet_bench.cu -lcublas -o tnet_bench     # set -arch for yo
   202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f 1
 ```
 
-Measured on a CMP 50HX (Turing, sm_75, CUDA 13.3, cuBLAS 13.6): 611.6 ms per attempt, 88.2% GEMM,
-57.5 TMAC/s, 292 ns per ticket, sample ticket `(0, 255, 23)` as in `vectors/README.md`. Memory: the
+| GPU | attempt | GEMM share | TMAC/s | ns / ticket |
+|---|---:|---:|---:|---:|
+| CMP 50HX (Turing, sm_75, CUDA 13.3) | 611.6 ms | 88.2% | 57.5 | 292 |
+| RTX 3090 (Ampere, sm_86, CUDA 12.8, ~328 W) | 334.5 ms | 86.7% | 105.2 | 159.5 |
+
+Both produce tickets accepted byte for byte by `tnet check` (e.g. `(0, 255, 23)` of `vectors/README.md`). Memory: the
 weights (512 MiB, plus a transposed copy) and `b n` bytes of activations with `4 b n` bytes of int32
 accumulators; reduce `b` on smaller GPUs (rows are independent).
 

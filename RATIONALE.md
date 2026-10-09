@@ -40,14 +40,16 @@ noise and without a usefulness claim.
   instead of a recomputation (ADR 0016).
 - **Epoch weights** change regularly, so they cannot be wired into silicon; nodes hold 512 MiB.
 
-## Measurements (Abacus `tnet-v1`, `tnet-v2`)
+## Measurements (Abacus `tnet-v1`, `tnet-v2`, `tnet-ampere-v1`)
 
 | | |
 |---|---|
 | GPU attempt (CMP 50HX, Turing) | 611.6 ms per nonce, 88.2% int8 GEMM, 57.5 TMAC/s, 292 ns per ticket |
-| Single-row mining | 42–45x more expensive per ticket than batched |
+| GPU attempt (RTX 3090, Ampere) | 334.5 ms per nonce, 86.7% int8 GEMM, 105 TMAC/s, 159.5 ns per ticket, ~328 W |
+| GPU/Rust parity | byte-identical tickets on both GPUs (CUDA 13.3 and 12.8) |
+| Single-row mining | 42–51x more expensive per ticket than batched |
 | CPU verification | 11.2 ms (8 threads) / 21.7 ms (1 thread), portable build |
-| Lottery | 388 tickets found against 384 expected |
+| Lottery | 388 / 902 tickets found against 384 / 896 expected |
 | Error propagation | one ±1 error after layer 1 changes 55% of the final row |
 | Approximate last layer | dropping 64 of 8192 terms: 26% exact pieces; int7 weights: none |
 | Precomputation (bound) | bit-plane tables: 4–12x slower than tensor cores on that GPU; ≥128x weight storage in silicon |
@@ -56,6 +58,6 @@ noise and without a usefulness claim.
 
 - An ASIC for int8 GEMM without the rest of an AI accelerator: its advantage is unmeasured (such a
   chip is an inference chip, which is the design's intent, but the margin matters).
-- Other GPU generations (Ampere and later): tensor share and ns per ticket.
+- Newer GPU generations (Ada, Hopper, Blackwell) and AI accelerators: tensor share and ns per ticket.
 - A measured LUT kernel to replace the precomputation bound.
 - Light clients: 512 MiB of weights and ~11 ms per header, or trust in full nodes.

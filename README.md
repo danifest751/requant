@@ -1,7 +1,9 @@
-# TNet (working title)
+# Requant
 
-A proof-of-work coin whose work is the forward pass of a deep int8 network: the arithmetic that GPU
-tensor cores and AI inference accelerators are built for.
+A proof-of-work coin (ticker **RQT**, provisional) whose work is the forward pass of a deep int8
+network: the arithmetic that GPU tensor cores and AI inference accelerators are built for. The name
+is the step that makes the work hard to shortcut: exact integer **requant**ization between layers.
+The work function is called **TNet**.
 
 **Status: pre-alpha.** The work function (**TNet v1**) is frozen with test vectors and reference
 implementations. There is no node, no network and no coin yet; see [`ROADMAP.md`](ROADMAP.md).
@@ -50,7 +52,7 @@ scripts/check.py local gate
 
 ## Background
 
-TNet comes out of the [Abacus](https://github.com/danifest751/Abacus) research lab, which tested
+Requant and TNet come out of the [Abacus](https://github.com/danifest751/Abacus) research lab, which tested
 linear-algebra proofs of work (Freivalds-verified matrix products, NTT, int8 GEMM with proofs) and
 recorded why most of them fail. TNet is its candidate T (ADR 0015/0016 there).
 
