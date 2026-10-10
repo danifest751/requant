@@ -14,8 +14,9 @@ Nothing here is a security or investment claim.
 ## Try the test network
 
 1. **Wallet.** Download `requant-wallet` for Windows or Linux from the
-   [latest release](https://github.com/danifest751/requant/releases/latest) and make a key:
-   `requant-wallet keygen my.key` prints your address (`trq1...`) and key hash.
+   [latest release](https://github.com/danifest751/requant/releases/latest) and make a wallet:
+   `requant-wallet create my.wallet` shows a 24-word backup phrase (write it down) and your address
+   (`trq1...`); `requant-wallet address my.wallet` prints it again with its key hash.
 2. **Test coins.** The **faucet** at http://193.187.93.29:19380/faucet sends 10 RQT to your address, once a
    day per address. Mined more than you need? Top it up:
    `trq1q8pqnx3uqer6jcxszen4tg3hylh5q645ae23yvra62a2nu98slqaqvvyume`.
@@ -34,8 +35,8 @@ Nothing here is a security or investment claim.
    [explorer](http://193.187.93.29:19380/); peers and pending transactions on the
    [network page](http://193.187.93.29:19380/network).
 5. **Run a node** (optional; the wallet sends payments through one): `requantd` from the same release,
-   `requantd --network test --connect 193.187.93.29:19333`, then `requant-wallet balance my.key` and
-   `requant-wallet send my.key <address> 1.5`. With `--auto-update` it installs new signed releases by
+   `requantd --network test --connect 193.187.93.29:19333`, then `requant-wallet balance my.wallet` and
+   `requant-wallet send my.wallet <address> 1.5`. With `--auto-update` it installs new signed releases by
    itself. Everything else: [`TESTNET.md`](TESTNET.md).
 
 ## How the work function works
@@ -78,8 +79,9 @@ cargo run --release --bin requantd -- --network regtest --mine <32-byte key hash
 curl -s -X POST 127.0.0.1:19445 -d '{"method":"getinfo","params":[]}'
 ```
 
-Wallet (regtest: add `--network regtest`): `requant-wallet keygen my.key`, then `--mine <key hash>` on the node,
-`requant-wallet balance my.key`, `requant-wallet send my.key <address> 1.5`; see `TESTNET.md` for the rest.
+Wallet (regtest: add `--network regtest`): `requant-wallet create my.wallet`, then `--mine <key hash>` on the
+node, `requant-wallet balance my.wallet`, `requant-wallet send my.wallet <address> 1.5`; see `TESTNET.md`
+for the rest.
 
 ## Layout
 
@@ -88,7 +90,7 @@ SPEC.md          TNet v1 work function (normative)
 crates/tnet/     Rust reference: derivations, verifier (Epoch), CLI (vectors, check, bench)
 crates/consensus/ chain rules of CHAIN.md: transactions, blocks, difficulty, emission, chain state
 crates/node/     requantd: storage, peer-to-peer sync and relay, mempool, JSON-RPC, regtest miner
-crates/wallet/   requant-wallet: keys, bech32m addresses, balance, payments through a node
+crates/wallet/   requant-wallet: 24-word wallets (BIP 39, SLIP-0010), offline signing, payments through a node
 reference/       pure-Python reference written from SPEC.md
 vectors/         frozen test vectors
 miner/cuda/      GPU attempt benchmark, the starting point of the miner

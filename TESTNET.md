@@ -48,18 +48,48 @@ address. A node runs one with `--faucet-key FILE` (an unencrypted key; `--faucet
 The wallet talks to a node's RPC (`--rpc HOST:PORT`, default `127.0.0.1:19334`); the test network is the
 default (`--network regtest` for local tests).
 
+A wallet is one file with many addresses, all restored from one 24-word backup phrase (BIP 39; keys by
+SLIP-0010 for ed25519 at `m/44'/1'/0'/chain'/index'`). The phrase is encrypted in the file under a
+passphrase (Argon2id, XChaCha20-Poly1305); the addresses are not, so looking needs no passphrase and
+spending does.
+
 ```sh
-target/release/requant-wallet keygen my.key                # asks a passphrase; prints address and key hash
-target/release/requant-wallet encrypt old.key              # encrypt an older key file, or change the passphrase
-target/release/requant-wallet balance my.key               # an address works too, everywhere a key file is shown
-target/release/requant-wallet history my.key 20
-target/release/requant-wallet coins my.key                 # unspent outputs
-target/release/requant-wallet tx <txid>
-target/release/requant-wallet send my.key <address> 1.5    # shows amount and fee, asks before sending
-target/release/requant-wallet send my.key <addr1> 1 <addr2> 0.25   # several recipients in one transaction
-target/release/requant-wallet send my.key <address> all    # everything spendable, minus the fee
-target/release/requant-wallet consolidate my.key           # merge many small coins (e.g. pool payouts) into one
+requant-wallet create my.wallet               # asks a passphrase; shows the backup phrase once and the address
+requant-wallet address my.wallet              # the current receive address and its key hash (for --payee)
+requant-wallet newaddress my.wallet           # a fresh address (one per payer keeps payments apart)
+requant-wallet addresses my.wallet            # the addresses handed out, with their coins
+requant-wallet balance my.wallet              # the whole wallet; an address or a key file works too
+requant-wallet history my.wallet 20           # moves between the wallet's own addresses net out to the fee
+requant-wallet coins my.wallet                # unspent outputs
+requant-wallet tx <txid>
+requant-wallet send my.wallet <address> 1.5   # shows amount, change and fee, asks before sending
+requant-wallet send my.wallet <addr1> 1 <addr2> 0.25   # several recipients in one transaction
+requant-wallet send my.wallet <address> all   # everything spendable, minus the fee
+requant-wallet consolidate my.wallet          # merge many small coins (e.g. pool payouts) into one
+requant-wallet phrase my.wallet               # show the backup phrase again
+requant-wallet encrypt my.wallet              # change the passphrase
+requant-wallet restore new.wallet             # from the phrase; asks a node which addresses were used
 ```
+
+Change goes to a new change address each time. A restore scans each chain until 20 unused addresses in a
+row; `--no-scan` restores without a node (the other addresses come back with a later restore).
+
+**Offline signing** keeps the phrase on a machine without network. The online machine needs only a
+watch-only copy:
+
+```sh
+requant-wallet watchonly my.wallet watch.wallet                      # on the offline machine; copy watch.wallet over
+requant-wallet prepare watch.wallet <address> 1.5 --out pay.json     # online: no passphrase, nothing secret
+requant-wallet sign my.wallet pay.json --out pay.signed              # offline: shows and checks the payment
+requant-wallet broadcast pay.signed                                  # online
+```
+
+`pay.json` carries the transactions that created the coins it spends: signatures do not cover the coins'
+values, so the signer reads them from those transactions (checked by txid) rather than trusting the
+online machine about the fee, and refuses a payment whose coins or change are not its own.
+
+**Single keys** (the older format) still work: `keygen my.key`, `encrypt my.key`, `address my.key`, and
+`balance`, `history`, `coins`, `send`, `consolidate` with a key file in place of the wallet.
 
 The fee follows the transaction's size: `--fee-rate` atoms per byte (default 5, at least 1000 atoms). A
 transaction takes at most 600 inputs; with more coins, `send ... all` and `consolidate` handle the first
