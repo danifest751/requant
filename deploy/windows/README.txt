@@ -46,4 +46,4 @@ Requant — тестовая сеть: майнер для Windows
 Если что-то не так
 - Антивирус может ругаться на майнер (cppminer.exe) — это типично для майнеров; добавьте папку в исключения.
 - "getwork failed" — нет связи с пулом или нода не запущена.
-- Подробнее: https://github.com/danifest751/requant (TESTNET.md).
+- Подробнее: https://github.com/requant-network/requant (TESTNET.md).

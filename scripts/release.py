@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-REPO = "danifest751/requant"
+REPO = "requant-network/requant"
 
 
 def sha256(path: Path) -> str:

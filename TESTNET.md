@@ -12,7 +12,7 @@ chain may be reset when the rules change (a reset changes the genesis time in `c
 | Explorer | http://193.187.93.29:19380/ |
 | Mining pool | `193.187.93.29:19340` (1% fee, PPLNS, payouts from 1 RQT; stats at http://193.187.93.29:19380/pool) |
 | Faucet | http://193.187.93.29:19380/faucet (10 RQT a day per address); top it up at `trq1q8pqnx3uqer6jcxszen4tg3hylh5q645ae23yvra62a2nu98slqaqvvyume` |
-| Node and wallet | `requantd`, `requant-wallet` for Linux and Windows: [releases](https://github.com/danifest751/requant/releases/latest) |
+| Node and wallet | `requantd`, `requant-wallet` for Linux and Windows: [releases](https://github.com/requant-network/requant/releases/latest) |
 | GPU miner | CPPminer `--algo tnet`: [releases](https://github.com/danifest751/CPPminer/releases/latest) |
 | Development fund | `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` (6%, `CHAIN.md` §8) |
 

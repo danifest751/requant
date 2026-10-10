@@ -8,7 +8,7 @@ decisions for the project owner, not engineering defaults.
 - [x] Second architecture: RTX 3090 (Ampere), 159.5 ns per ticket, 86.7% tensor share, parity holds
       (Abacus `tnet-ampere-v1`). Next: Ada / Hopper / Blackwell.
 - [ ] External review of `SPEC.md` and `crates/tnet`.
-- [x] Coin name and repository: Requant (`danifest751/requant`); ticker RQT, provisional until checked
+- [x] Coin name and repository: Requant (`requant-network/requant`, first `danifest751/requant`); ticker RQT, provisional until checked
       against exchanges and trademarks (**owner**).
 
 ## 1. Chain parameters

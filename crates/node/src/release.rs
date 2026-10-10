@@ -6,7 +6,7 @@
 //! ```text
 //! requant-release 1
 //! version 0.6.1
-//! asset linux-x86_64 <sha256 hex> https://github.com/danifest751/requant/releases/download/v0.6.1/requantd-linux-x86_64
+//! asset linux-x86_64 <sha256 hex> https://github.com/requant-network/requant/releases/download/v0.6.1/requantd-linux-x86_64
 //! asset windows-x86_64 <sha256 hex> https://...
 //! ```
 //!

@@ -14,7 +14,7 @@ Nothing here is a security or investment claim.
 ## Try the test network
 
 1. **Wallet.** Download `requant-wallet` for Windows or Linux from the
-   [latest release](https://github.com/danifest751/requant/releases/latest) and make a wallet:
+   [latest release](https://github.com/requant-network/requant/releases/latest) and make a wallet:
    `requant-wallet create my.wallet` shows a 24-word backup phrase (write it down) and your address
    (`trq1...`); `requant-wallet address my.wallet` prints it again with its key hash.
 2. **Test coins.** The **faucet** at http://193.187.93.29:19380/faucet sends 10 RQT to your address, once a

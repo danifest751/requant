@@ -312,7 +312,7 @@ fn page(title: &str, body: &str, refresh: bool) -> String {
 <div class=\"top\"><div class=\"in\"><a class=\"brand\" href=\"/\"><span class=\"logo\">R</span>Requant</a><span class=\"tag\">testnet</span>\
 <nav><a href=\"/\"{}>Explorer</a><a href=\"/network\"{}>Network</a><a href=\"/pool\"{}>Pool</a><a href=\"/faucet\"{}>Faucet</a></nav>\
 <form action=\"/search\"><input name=\"q\" placeholder=\"Search block height, block id, txid or address\" aria-label=\"Search\"></form></div></div>\
-<main>{body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/danifest751/requant\">source</a></footer></main></body></html>",
+<main>{body}<footer>Requant test network · test coins have no value · <a href=\"https://github.com/requant-network/requant\">source</a></footer></main></body></html>",
         on("Requant test network"),
         on("Network"),
         on("Mining pool"),
@@ -986,7 +986,7 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
     body += &format!(
         "<div class=\"panel\"><h3>Start mining</h3><ol class=\"steps\">\
          <li><b>Get a wallet address.</b> <code>requant-wallet keygen my.key</code> prints your address and key hash \
-         (<a href=\"https://github.com/danifest751/requant/releases/latest\">wallet download</a>).</li>\
+         (<a href=\"https://github.com/requant-network/requant/releases/latest\">wallet download</a>).</li>\
          <li><b>Download CPPminer</b> (NVIDIA, RTX 20xx or newer):<div class=\"dl\">\
          <a class=\"btn pri\" href=\"https://github.com/danifest751/CPPminer/releases/latest\">Windows</a>\
          <a class=\"btn\" href=\"https://github.com/danifest751/CPPminer/releases/latest\">Linux</a></div></li>\
