@@ -13,6 +13,7 @@ pub mod node;
 pub mod pool;
 pub mod release;
 pub mod rpc;
+pub mod signal;
 pub mod snapshot;
 pub mod store;
 pub mod watch;

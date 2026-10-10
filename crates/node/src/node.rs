@@ -1246,19 +1246,39 @@ fn connection_manager(
         }
         std::thread::sleep(interval);
     }
-    let mut st = shared.lock().unwrap();
-    st.book.save();
-    st.save_mempool();
-    drop(st);
-    write_snapshot(&shared);
+    persist(&shared);
 }
 
+/// One snapshot write at a time (they share the temporary file).
+static SNAPSHOT_WRITE: Mutex<()> = Mutex::new(());
+
 fn write_snapshot(shared: &Shared) {
+    let _one = SNAPSHOT_WRITE.lock().unwrap_or_else(|e| e.into_inner());
     let snap = shared.lock().unwrap().snapshot_bytes();
     if let Some((path, bytes)) = snap {
         if let Err(e) = crate::snapshot::save(&path, &bytes) {
             eprintln!("snapshot: {e}");
         }
+    }
+}
+
+/// Save everything a restart should find: peer addresses, the upload counter, the mempool and the start-up
+/// snapshot (blocks, the pool and the faucet are written as they change).
+pub fn persist(shared: &Shared) {
+    {
+        let mut st = shared.lock().unwrap();
+        st.book.save();
+        st.save_upload();
+        st.save_mempool();
+    }
+    write_snapshot(shared);
+}
+
+impl Handle {
+    /// Stop the node's loops and save its state (see [`persist`]); the process may exit afterwards.
+    pub fn shutdown(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        persist(&self.shared);
     }
 }
 

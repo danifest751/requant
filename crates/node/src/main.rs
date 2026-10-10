@@ -168,8 +168,21 @@ fn main() {
     match start(cfg) {
         Ok(h) => {
             eprintln!("{} {net_name}: p2p {} rpc {}", agent(), h.p2p, h.rpc.map(|a| a.to_string()).unwrap_or_default());
+            requant_node::signal::install();
+            let mut last_status = std::time::Instant::now();
             loop {
-                std::thread::sleep(Duration::from_secs(60));
+                std::thread::sleep(Duration::from_millis(250));
+                if requant_node::signal::requested() {
+                    eprintln!("stopping: saving state");
+                    h.shutdown();
+                    eprintln!("stopped at height {}", h.shared.lock().unwrap().chain.height());
+                    requant_node::signal::done();
+                    std::process::exit(0);
+                }
+                if last_status.elapsed() < Duration::from_secs(60) {
+                    continue;
+                }
+                last_status = std::time::Instant::now();
                 let st = h.shared.lock().unwrap();
                 eprintln!("height {} peers {} mempool {}", st.chain.height(), st.peer_count(), st.mempool.len());
                 let tip_time = st.chain.block(&st.chain.tip()).map(|b| b.header.time).unwrap_or(0);

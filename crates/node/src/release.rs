@@ -299,7 +299,7 @@ pub fn updater(shared: Shared, dir: PathBuf) {
                 // pending until it has run HEALTHY_AFTER seconds (see `startup_check`)
                 let _ = std::fs::write(dir.join(PENDING), format!("{} {} 0\n", r.version_string(), now()));
                 eprintln!("updated to requantd {} ({}); restarting", r.version_string(), exe.display());
-                shared.lock().unwrap().book.save();
+                crate::node::persist(&shared);
                 std::process::exit(0);
             }
             Err(e) => {

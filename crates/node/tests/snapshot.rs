@@ -4,7 +4,6 @@
 use requant_consensus::params::Network;
 use requant_node::node::{start, Config, Handle};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 fn datadir(tag: &str) -> PathBuf {
@@ -47,9 +46,9 @@ fn state(h: &Handle) -> State {
     (c.height(), c.tip(), c.utxo_audit(), st.index.tx_count(), st.index.address_count(), st.headers.height())
 }
 
-/// Stop the node's threads (the connection manager writes the snapshot on the way out).
+/// Stop the node as `requantd` does on a signal: save the state, then let the threads wind down.
 fn stop(h: Handle) {
-    h.stop.store(true, Ordering::Relaxed);
+    h.shutdown();
     std::thread::sleep(Duration::from_millis(600));
     drop(h);
 }
@@ -68,6 +67,11 @@ fn restart_from_snapshot_replays_only_the_tail() {
     let snap = dir.join("regtest").join("chainstate.bin");
     let a = node(&dir, true);
     mine_to(&a, 6);
+    let h = a.shared.lock().unwrap().chain.height();
+    a.shutdown();
+    // the snapshot written at shutdown covers at least the tip of that moment
+    let saved = requant_node::snapshot::load(&snap, &Network::regtest(), 1).unwrap();
+    assert!(saved.chain.height() >= h);
     stop(a);
     let early = std::fs::read(&snap).expect("snapshot written at shutdown");
 
