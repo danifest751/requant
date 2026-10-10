@@ -75,6 +75,11 @@ fn public_api() {
     // many owners at once: every entry names its owner
     let (_, _, many) = http(explorer, "GET", &format!("/api/utxos?owners={},{}", hex(&payee), hex(&[1; 32])), "");
     assert!(many.as_array().unwrap().iter().all(|c| c["owner"] == hex(&payee)));
+    // the full 200 fit in the request line
+    let full: Vec<String> = (0..199u8).map(|k| hex(&[k; 32])).chain([hex(&payee)]).collect();
+    let (code, _, many) = http(explorer, "GET", &format!("/api/history?owners={}&limit=1", full.join(",")), "");
+    assert_eq!(code, 200, "{many}");
+    assert!(many.as_array().unwrap().iter().any(|e| e["owner"] == hex(&payee)));
     let (_, _, fee) = http(explorer, "GET", "/api/fee?blocks=2", "");
     assert_eq!((fee["blocks"].as_u64(), fee["feerate"].as_u64()), (Some(2), Some(1)));
 

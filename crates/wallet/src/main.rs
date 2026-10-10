@@ -2,9 +2,12 @@
 //!
 //! A wallet (one file, many addresses, one 24-word backup phrase):
 //! requant-wallet create      WALLET [--no-passphrase]          (shows the backup phrase once)
-//! requant-wallet restore     WALLET [--no-passphrase] [--no-scan]   (from the phrase; finds the used addresses)
+//! requant-wallet restore     WALLET [--no-passphrase] [--no-scan] [--count N]   (from the phrase; finds the used
+//!                                                           addresses; --count: at least N receive addresses,
+//!                                                           for a deposit list with long unused runs)
 //! requant-wallet phrase      WALLET                           (show the backup phrase again)
-//! requant-wallet newaddress  WALLET                           (a fresh receive address)
+//! requant-wallet newaddress  WALLET [--count N] [--out FILE] (fresh receive addresses, one per line;
+//!                                                           N at once for a service's deposit list)
 //! requant-wallet addresses   WALLET                           (addresses handed out, with their coins)
 //! requant-wallet watchonly   WALLET OUT                       (a copy without the secret, for an online machine)
 //! Offline signing: prepare on an online machine (a watch-only copy is enough), sign on one without network:
@@ -164,14 +167,16 @@ fn coins(rpc: &Backend, owner: &Hash) -> Vec<(Spendable, bool, bool)> {
         .collect()
 }
 
-/// Coins of many owners: a hundred per request (each entry names its owner), or one request per owner
+/// Coins of many owners: a list per request (each entry names its owner), or one request per owner
 /// with a node too old for lists.
 fn all_coins(rpc: &Backend, owners: &[Hash]) -> Vec<(Spendable, bool, bool)> {
     let mut all = Vec::new();
-    for chunk in owners.chunks(100) {
+    for chunk in owners.chunks(rpc.list_max()) {
         let list: Vec<String> = chunk.iter().map(|o| hex(o)).collect();
-        let Ok(v) = rpc.call("utxos", json!([list])) else {
-            return owners.iter().flat_map(|o| coins(rpc, o)).collect();
+        let v = match rpc.call("utxos", json!([list])) {
+            Ok(v) => v,
+            Err(_) if rpc.per_owner_fallback() => return owners.iter().flat_map(|o| coins(rpc, o)).collect(),
+            Err(e) => die(&format!("api: {e}")),
         };
         let Some(items) = v.as_array() else { die(&format!("unexpected answer to utxos: {v}")) };
         for c in items {
@@ -283,12 +288,13 @@ fn print_history(rpc: &Backend, owners: &[Hash], limit: u64) {
     // per transaction, what the whole wallet received and sent (moves between its own addresses net out)
     type Row = (Option<u64>, serde_json::Value, u64, u64);
     let mut by_tx: HashMap<String, Row> = HashMap::new();
-    // a hundred owners per request, or one request each with a node too old for lists
+    // a list of owners per request, or one request each with a node too old for lists
     let mut answers = Vec::new();
-    for chunk in owners.chunks(100) {
+    for chunk in owners.chunks(rpc.list_max()) {
         let list: Vec<String> = chunk.iter().map(|o| hex(o)).collect();
         match rpc.call("history", json!([list, limit])) {
             Ok(v) => answers.push(v),
+            Err(e) if !rpc.per_owner_fallback() => die(&format!("api: {e}")),
             Err(_) => {
                 answers = owners
                     .iter()
@@ -333,6 +339,10 @@ fn main() {
     let api = opt("--api");
     let rpc_opt = opt("--rpc");
     let out = opt("--out");
+    let count = opt("--count").map(|c| match c.parse::<u32>() {
+        Ok(n @ 1..=100_000) => n,
+        _ => die("--count needs a number from 1 to 100000"),
+    });
     if let Some(c) = opt("--rpc-cookie") {
         // the RPC client reads the cookie file named here (see `requant_node::rpc::request`)
         std::env::set_var("REQUANT_RPC_COOKIE", c);
@@ -432,10 +442,14 @@ fn main() {
                 w.scan(&seed, |batch| {
                     // one request for the batch (entries name their owner); one per address with an older node
                     let list: Vec<String> = batch.iter().map(|o| hex(o)).collect();
-                    if let Ok(v) = addr.call("history", json!([list, 1])) {
-                        let seen: std::collections::HashSet<&str> =
-                            v.as_array().into_iter().flatten().filter_map(|e| e["owner"].as_str()).collect();
-                        return Ok(list.iter().map(|o| seen.contains(o.as_str())).collect());
+                    match addr.call("history", json!([list, 1])) {
+                        Ok(v) => {
+                            let seen: std::collections::HashSet<&str> =
+                                v.as_array().into_iter().flatten().filter_map(|e| e["owner"].as_str()).collect();
+                            return Ok(list.iter().map(|o| seen.contains(o.as_str())).collect());
+                        }
+                        Err(e) if !addr.per_owner_fallback() => return Err(format!("api: {e}")),
+                        Err(_) => {}
                     }
                     batch
                         .iter()
@@ -447,6 +461,11 @@ fn main() {
                 })
                 .unwrap_or_else(|e| die(&format!("{e} (use --no-scan to restore without a node)")));
                 println!("found {} receive and {} change addresses in use", w.receive_issued, w.change_issued);
+            }
+            if let Some(n) = count {
+                // a scan stops after LOOKAHEAD unused addresses in a row; a deposit list handed out more
+                w.receive_issued = w.receive_issued.max(n);
+                w.top_up(&hd::seed_of(&entropy, ""));
             }
             save(path, &w);
             println!("wallet restored to {path}");
@@ -465,17 +484,24 @@ fn main() {
         }
         ["newaddress", path] => {
             let (path, mut w) = wallet_arg(&net, path);
-            let owner = match w.next_receive() {
-                Some(o) => o,
-                None => {
-                    // every derived address is handed out: derive more (needs the seed)
-                    let seed = unlock(&path, &w);
-                    w.top_up(&seed);
-                    w.next_receive().unwrap()
-                }
-            };
+            let mut seed = None;
+            let mut list = Vec::new();
+            for _ in 0..count.unwrap_or(1) {
+                let owner = match w.next_receive() {
+                    Some(o) => o,
+                    None => {
+                        // every derived address is handed out: derive more (needs the seed, asked once)
+                        let s = seed.get_or_insert_with(|| unlock(&path, &w));
+                        w.top_up(s);
+                        w.next_receive().unwrap()
+                    }
+                };
+                list.push(address(&net, &owner));
+            }
+            // handed out before they are shown: a list that was printed is never handed out again
             save(&path, &w);
-            println!("{}", address(&net, &owner));
+            write_out(&list.join("
+"), &format!("{} addresses", list.len()));
         }
         ["addresses", path] => {
             let (_, w) = wallet_arg(&net, path);
@@ -769,8 +795,8 @@ fn main() {
             println!("sent, txid {}", send(&rpc(), &tx));
         }
         _ => die(concat!(
-            "usage: requant-wallet create WALLET [--no-passphrase] | restore WALLET [--no-scan] | phrase WALLET\n",
-            "       | newaddress WALLET | addresses WALLET | watchonly WALLET OUT\n",
+            "usage: requant-wallet create WALLET [--no-passphrase] | restore WALLET [--no-scan] [--count N]\n",
+            "       | phrase WALLET | newaddress WALLET [--count N] | addresses WALLET | watchonly WALLET OUT\n",
             "       | prepare WALLET ADDRESS AMOUNT|all [ADDRESS AMOUNT]... [--out FILE] | sign WALLET FILE [--out FILE]\n",
             "       | broadcast FILE | keygen KEYFILE [--no-passphrase] | encrypt KEYFILE|WALLET | address KEYFILE|WALLET\n",
             "       | balance SRC | history SRC [N] | coins SRC | tx TXID   (SRC: an address, a key file or a wallet)\n",

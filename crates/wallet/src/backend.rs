@@ -31,6 +31,22 @@ impl Backend {
         Ok(Backend::Api { host, addr })
     }
 
+    /// Owners per list request: a hundred through RPC; through the API, as many as fit the 2048-byte
+    /// request line of nodes up to 0.15.1 (a key hash takes 65 bytes of it).
+    pub fn list_max(&self) -> usize {
+        match self {
+            Backend::Rpc(_) => 100,
+            Backend::Api { .. } => 25,
+        }
+    }
+
+    /// Whether a failed list request may be retried one owner at a time: only through RPC, for a node
+    /// older than lists (every node with the API has them, and a refusal there is not a reason to send
+    /// more requests).
+    pub fn per_owner_fallback(&self) -> bool {
+        matches!(self, Backend::Rpc(_))
+    }
+
     /// A node RPC call; with an API backend, the calls the wallet makes are mapped to API paths.
     pub fn call(&self, method: &str, params: Value) -> io::Result<Value> {
         let (host, addr) = match self {

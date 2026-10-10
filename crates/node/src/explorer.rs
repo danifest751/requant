@@ -42,7 +42,8 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
-    reader.by_ref().take(2048).read_line(&mut line)?;
+    // room for the API's longest request: 200 owners in the query (node 0.15.1 and older cut it at 2048 bytes)
+    reader.by_ref().take(16 << 10).read_line(&mut line)?;
     let method = line.split_whitespace().next().unwrap_or("GET").to_string();
     let path = line.split_whitespace().nth(1).unwrap_or("/").to_string();
     // read the headers, keeping the host name (shown in the pool's connect command) and the body length

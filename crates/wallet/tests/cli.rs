@@ -170,6 +170,23 @@ fn wallet_end_to_end() {
         cli.run_env(&["restore", "x.json", "--no-passphrase"], &[("REQUANT_WALLET_PHRASE", "abandon art")]);
     assert!(!ok && err.contains("24 words"), "{err}");
 
+    // a deposit list: 30 addresses at once (past the derived-ahead 20), written to a file; a restore
+    // with --count covers them although they are an unused run longer than the scan's gap
+    cli.ok(&["newaddress", "w.json", "--count", "30", "--out", "deposits.txt"]);
+    let list: Vec<String> =
+        std::fs::read_to_string(d.join("deposits.txt")).unwrap().lines().map(str::to_string).collect();
+    assert_eq!(list.len(), 30);
+    let w = cli.wallet("w.json");
+    assert_eq!(w.receive_issued, 32);
+    assert_eq!(list, w.receive[2..32].iter().map(|o| address(&net, o)).collect::<Vec<_>>());
+    assert!(!cli.run_env(&["newaddress", "w.json", "--count", "0"], &[]).0);
+    let (ok, out, err) =
+        cli.run_env(&["restore", "r3.json", "--no-passphrase", "--count", "32"], &[("REQUANT_WALLET_PHRASE", &phrase)]);
+    assert!(ok, "{out} {err}");
+    let r = cli.wallet("r3.json");
+    assert_eq!(r.receive_issued, 32);
+    assert_eq!(r.receive[..32], w.receive[..32]);
+
     // without a node of one's own: the same wallet through the explorer's public API (the RPC address is
     // made unreachable to be sure)
     cli.api = Some(format!("http://{explorer}"));

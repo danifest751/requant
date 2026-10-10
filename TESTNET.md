@@ -76,6 +76,7 @@ spending does.
 requant-wallet create my.wallet               # asks a passphrase; shows the backup phrase once and the address
 requant-wallet address my.wallet              # the current receive address and its key hash (for --payee)
 requant-wallet newaddress my.wallet           # a fresh address (one per payer keeps payments apart)
+requant-wallet newaddress my.wallet --count 1000 --out deposits.txt   # a service's deposit list, one per line
 requant-wallet addresses my.wallet            # the addresses handed out, with their coins
 requant-wallet balance my.wallet              # the whole wallet; an address or a key file works too
 requant-wallet history my.wallet 20           # moves between the wallet's own addresses net out to the fee
@@ -92,6 +93,9 @@ requant-wallet restore new.wallet             # from the phrase; asks a node whi
 
 Change goes to a new change address each time. A restore scans each chain until 20 unused addresses in a
 row; `--no-scan` restores without a node (the other addresses come back with a later restore).
+A deposit list handed out at once has long runs of unused addresses that a scan would stop in:
+`restore new.wallet --count 1000` hands out at least that many receive addresses (keep the count with the
+phrase).
 
 **Offline signing** keeps the phrase on a machine without network. The online machine needs only a
 watch-only copy:
