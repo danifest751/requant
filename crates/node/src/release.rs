@@ -190,6 +190,77 @@ fn install(r: &Release, dir: &Path) -> Result<PathBuf, String> {
     Ok(exe)
 }
 
+/// An installed update stays "pending" until it has run this long; starts beyond `MAX_STARTS` before that mean
+/// it keeps failing, and the previous binary is put back.
+const HEALTHY_AFTER: u64 = 600;
+const MAX_STARTS: u32 = 3;
+const PENDING: &str = "pending.txt";
+const BAD: &str = "bad.txt";
+
+/// Releases that were rolled back here (one version per line in `bad.txt`); never installed again.
+pub fn bad_versions(dir: &Path) -> std::collections::HashSet<Version> {
+    std::fs::read_to_string(dir.join(BAD)).unwrap_or_default().lines().filter_map(parse_version).collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Start {
+    /// Nothing pending, or a pending update counted one more start.
+    Run,
+    /// The pending update failed too often: put the previous binary back.
+    RollBack(Version),
+}
+
+/// Count a start of a pending update (`version installed_at starts` in `pending.txt`).
+pub fn count_start(dir: &Path, running: Version) -> Start {
+    let path = dir.join(PENDING);
+    let Ok(text) = std::fs::read_to_string(&path) else { return Start::Run };
+    let f: Vec<&str> = text.split_whitespace().collect();
+    let (Some(v), Some(at), Some(n)) = (
+        f.first().and_then(|v| parse_version(v)),
+        f.get(1).and_then(|t| t.parse::<u64>().ok()),
+        f.get(2).and_then(|n| n.parse::<u32>().ok()),
+    ) else {
+        let _ = std::fs::remove_file(&path);
+        return Start::Run;
+    };
+    if v != running {
+        // installed by hand meanwhile: not ours to judge
+        let _ = std::fs::remove_file(&path);
+        return Start::Run;
+    }
+    if n + 1 > MAX_STARTS {
+        return Start::RollBack(v);
+    }
+    let _ = std::fs::write(&path, format!("{}.{}.{} {at} {}\n", v.0, v.1, v.2, n + 1));
+    Start::Run
+}
+
+/// First thing at start: if a just-installed update keeps failing, put the previous binary back, remember the
+/// version as bad, and exit for the service manager to start the old one.
+pub fn startup_check(dir: &Path) {
+    let Start::RollBack(v) = count_start(dir, own_version()) else { return };
+    let vs = format!("{}.{}.{}", v.0, v.1, v.2);
+    let Ok(exe) = std::env::current_exe() else { return };
+    let prev = exe.with_extension(if cfg!(windows) { "prev.exe" } else { "prev" });
+    if !prev.exists() {
+        eprintln!("update to {vs} failed {MAX_STARTS} starts in a row, but there is no previous binary to go back to");
+        let _ = std::fs::remove_file(dir.join(PENDING));
+        return;
+    }
+    let bad = exe.with_extension(if cfg!(windows) { "bad.exe" } else { "bad" });
+    let _ = std::fs::remove_file(&bad);
+    if std::fs::rename(&exe, &bad).is_err() || std::fs::rename(&prev, &exe).is_err() {
+        eprintln!("update to {vs} keeps failing and the previous binary could not be put back");
+        return;
+    }
+    let mut list = std::fs::read_to_string(dir.join(BAD)).unwrap_or_default();
+    list += &format!("{vs}\n");
+    let _ = std::fs::write(dir.join(BAD), list);
+    let _ = std::fs::remove_file(dir.join(PENDING));
+    eprintln!("update to {vs} failed {MAX_STARTS} starts in a row: the previous binary is back; restarting");
+    std::process::exit(1);
+}
+
 /// With `--auto-update`: wait for a newer release, then install it at a random moment within `SPREAD`
 /// seconds and exit (the service manager starts the new binary). Failures are logged and retried a few
 /// times; the node keeps running meanwhile.
@@ -198,8 +269,17 @@ pub fn updater(shared: Shared, dir: PathBuf) {
     let mut tries = 0u32;
     loop {
         std::thread::sleep(Duration::from_secs(20));
+        // an installed update that has run for HEALTHY_AFTER seconds is kept for good
+        let started = shared.lock().unwrap().started;
+        if now().saturating_sub(started) >= HEALTHY_AFTER && std::fs::remove_file(dir.join(PENDING)).is_ok() {
+            eprintln!("update to {VERSION} confirmed: ran {} min without trouble", HEALTHY_AFTER / 60);
+        }
+        let bad = bad_versions(&dir);
         let r = shared.lock().unwrap().release.clone();
-        let Some(r) = r.filter(|r| r.version > own_version() && r.asset().is_some()) else { continue };
+        let Some(r) = r.filter(|r| r.version > own_version() && r.asset().is_some() && !bad.contains(&r.version))
+        else {
+            continue;
+        };
         match due {
             Some((v, _)) if v == r.version => {}
             _ => {
@@ -216,6 +296,8 @@ pub fn updater(shared: Shared, dir: PathBuf) {
         tries += 1;
         match install(&r, &dir) {
             Ok(exe) => {
+                // pending until it has run HEALTHY_AFTER seconds (see `startup_check`)
+                let _ = std::fs::write(dir.join(PENDING), format!("{} {} 0\n", r.version_string(), now()));
                 eprintln!("updated to requantd {} ({}); restarting", r.version_string(), exe.display());
                 shared.lock().unwrap().book.save();
                 std::process::exit(0);
@@ -235,6 +317,27 @@ mod tests {
 
     fn signed(key: &SigningKey, text: &str) -> [u8; 64] {
         key.sign(&signed_message(text)).to_bytes()
+    }
+
+    #[test]
+    fn a_failing_update_is_rolled_back_after_three_starts() {
+        let dir = std::env::temp_dir().join(format!("requant-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let v = (9, 9, 9);
+        assert_eq!(count_start(&dir, v), Start::Run); // nothing pending
+        std::fs::write(dir.join(PENDING), "9.9.9 100 0\n").unwrap();
+        for _ in 0..MAX_STARTS {
+            assert_eq!(count_start(&dir, v), Start::Run);
+        }
+        assert_eq!(count_start(&dir, v), Start::RollBack(v));
+        // a pending note for another version (installed by hand) is dropped
+        std::fs::write(dir.join(PENDING), "9.9.8 100 2\n").unwrap();
+        assert_eq!(count_start(&dir, v), Start::Run);
+        assert!(!dir.join(PENDING).exists());
+        std::fs::write(dir.join(BAD), "1.2.3\n9.9.9\n").unwrap();
+        assert!(bad_versions(&dir).contains(&(9, 9, 9)) && bad_versions(&dir).len() == 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

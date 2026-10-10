@@ -47,6 +47,25 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const PING_EVERY: u64 = 120;
 /// How long an address that sent invalid data is refused.
 const BAN_SECS: u64 = 3600;
+/// Misbehaviour points that get a peer banned.
+pub const BAN_SCORE: u32 = 100;
+/// Messages a peer may send per second on average, and at once.
+const MSG_RATE: f64 = 300.0;
+const MSG_BURST: f64 = 1000.0;
+
+/// Points for an error a peer caused, or `None` for errors that only end the connection (protocol
+/// mismatch, a connection to ourselves). Invalid work is outright hostile; a bad transaction may be
+/// relayed in good faith from an older node, so it costs little.
+pub fn misbehaviour(why: &str) -> Option<u32> {
+    match why {
+        "invalid block" | "invalid header" | "malformed block" | "malformed headers" => Some(BAN_SCORE),
+        "invalid release" => Some(50),
+        "invalid transaction" | "malformed transaction" => Some(10),
+        "message flood" => Some(1),
+        w if w.starts_with("invalid") || w.starts_with("malformed") => Some(20),
+        _ => None,
+    }
+}
 /// Bytes served for one `GetData` request.
 const MAX_GETDATA_BYTES: usize = 32 << 20;
 /// Bytes queued for a peer that does not read them; beyond this the peer is disconnected.
@@ -121,6 +140,8 @@ pub struct Peer {
     /// Protocol version from the peer's greeting (0 until it arrives).
     pub protocol: u32,
     inflight: usize,
+    /// Misbehaviour points; at `BAN_SCORE` the peer is banned (see `misbehaviour`).
+    pub score: u32,
 }
 
 impl Peer {
@@ -167,6 +188,9 @@ pub struct State {
     bans_path: PathBuf,
     /// Where epoch weights files live (see `epochs`).
     epoch_dir: PathBuf,
+    /// The mempool's file, and the pool version last written there.
+    mempool_path: PathBuf,
+    mempool_saved: (u64, usize),
     /// The newest verified release (see `release`), kept in `release_path`.
     pub release: Option<crate::release::Release>,
     release_path: PathBuf,
@@ -229,6 +253,53 @@ impl State {
 
     pub fn banned(&self, ip: &IpAddr) -> bool {
         self.bans.get(ip).is_some_and(|&t| t > now())
+    }
+
+    /// Write the mempool to `mempool.dat` if it changed (each transaction as LE32 length and bytes, in arrival
+    /// order; written to a temporary file, then renamed).
+    pub fn save_mempool(&mut self) {
+        if self.mempool.version() == self.mempool_saved {
+            return;
+        }
+        let mut out = Vec::new();
+        for tx in self.mempool.ordered() {
+            let b = tx.encode();
+            out.extend_from_slice(&(b.len() as u32).to_le_bytes());
+            out.extend_from_slice(&b);
+        }
+        let tmp = self.mempool_path.with_extension("tmp");
+        if std::fs::write(&tmp, out).and_then(|_| std::fs::rename(&tmp, &self.mempool_path)).is_ok() {
+            self.mempool_saved = self.mempool.version();
+        }
+    }
+
+    /// Re-admit the saved mempool (each transaction checked again against the chain).
+    fn load_mempool(&mut self) -> usize {
+        let Ok(b) = std::fs::read(&self.mempool_path) else { return 0 };
+        let (mut k, mut n) = (0usize, 0usize);
+        while k + 4 <= b.len() {
+            let len = u32::from_le_bytes(b[k..k + 4].try_into().unwrap()) as usize;
+            let Some(raw) = b.get(k + 4..k + 4 + len) else { break };
+            if let Ok(tx) = Tx::decode_exact(raw) {
+                n += self.mempool.add(tx, &self.chain).is_ok() as usize;
+            }
+            k += 4 + len;
+        }
+        self.mempool_saved = self.mempool.version();
+        n
+    }
+
+    /// Add misbehaviour points to a peer; at `BAN_SCORE` it is banned. Returns whether to disconnect.
+    fn misbehave(&mut self, peer: u64, points: u32, why: &str) -> bool {
+        let Some(p) = self.peers.get_mut(&peer) else { return true };
+        p.score = p.score.saturating_add(points);
+        if p.score < BAN_SCORE {
+            return false;
+        }
+        let ip = p.addr.ip();
+        eprintln!("peer {}: banned ({why}; misbehaviour {})", p.addr, p.score);
+        self.ban(ip);
+        true
     }
 
     fn ban(&mut self, ip: IpAddr) {
@@ -688,6 +759,7 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
             since: now(),
             protocol: 0,
             inflight: 0,
+            score: 0,
         };
         st.peers.insert(id, peer);
         (id, st.hello(), magic(&st.chain.net))
@@ -711,19 +783,35 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
     let reader_stream = stream.try_clone()?;
     std::thread::spawn(move || {
         let mut reader = BufReader::new(reader_stream);
+        // messages per second: MSG_RATE on average, MSG_BURST at once
+        let (mut tokens, mut last) = (MSG_BURST, std::time::Instant::now());
         while let Ok(m) = read_msg(&mut reader, &magic) {
+            let t = std::time::Instant::now();
+            tokens = (tokens + t.duration_since(last).as_secs_f64() * MSG_RATE).min(MSG_BURST);
+            last = t;
+            let flood = tokens < 1.0;
+            if !flood {
+                tokens -= 1.0;
+            }
             let result = match m {
                 Msg::Headers(bytes) => handle_headers(&shared, id, &bytes),
                 m => shared.lock().unwrap().on_message(id, m),
             };
             let mut st = shared.lock().unwrap();
-            if let Err(why) = result {
+            let why = match result {
+                Err(why) => Some(why),
+                Ok(()) if flood => Some("message flood"),
+                Ok(()) => None,
+            };
+            let Some(why) = why else { continue };
+            let Some(points) = misbehaviour(why) else {
+                // not the peer's fault, or nothing to keep talking about
                 if why != "connected to self" {
                     eprintln!("peer {addr}: disconnecting ({why})");
-                    if why.starts_with("invalid") || why.starts_with("malformed") {
-                        st.ban(addr.ip());
-                    }
                 }
+                break;
+            };
+            if st.misbehave(id, points, why) {
                 break;
             }
         }
@@ -813,6 +901,8 @@ fn load_bans(path: &std::path::Path) -> HashMap<IpAddr, u64> {
 /// Open storage, replay it, and start listening, connecting, RPC and mining as configured.
 pub fn start(cfg: Config) -> io::Result<Handle> {
     let dir = cfg.datadir.join(cfg.net.name);
+    // a just-installed update that keeps failing is rolled back before anything else (see `release`)
+    crate::release::startup_check(&dir.join("update"));
     let (store, records) = Store::open(&dir)?;
     let mut chain = Chain::new(cfg.net.clone(), cfg.threads);
     chain.set_max_reorg(cfg.max_reorg);
@@ -840,7 +930,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     let allow_local = cfg.net.name == "regtest";
     let listener = TcpListener::bind(cfg.listen)?;
     let p2p = listener.local_addr()?;
-    let state = State {
+    let mut state = State {
         chain,
         headers,
         inflight: HashMap::new(),
@@ -861,12 +951,18 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         started: now(),
         pool: cfg.pool.clone().map(|p| crate::pool::Pool::new(p, dir.join("pool.json"))),
         epoch_dir: dir.join("epochs"),
+        mempool_path: dir.join("mempool.dat"),
+        mempool_saved: (0, 0),
         release: crate::release::load(&dir.join("release.bin"), &cfg.release_key),
         release_path: dir.join("release.bin"),
         auto_update: cfg.auto_update,
         release_key: cfg.release_key,
-        faucet: cfg.faucet.clone().map(crate::faucet::Faucet::new),
+        faucet: cfg.faucet.clone().map(|f| crate::faucet::Faucet::new(f, dir.join("faucet.json"))),
     };
+    let restored = state.load_mempool();
+    if restored > 0 {
+        eprintln!("mempool: {restored} transactions restored");
+    }
     let shared: Shared = Arc::new(Mutex::new(state));
     let stop = Arc::new(AtomicBool::new(false));
     // the current epoch's weights before anything can ask for them (otherwise the first request derives
@@ -928,7 +1024,7 @@ fn connection_manager(
 ) {
     let mut rng = random_u64() | 1;
     let mut warned: HashSet<String> = HashSet::new();
-    let (mut last_ping, mut last_save) = (0u64, now());
+    let (mut last_ping, mut last_save, mut last_mempool) = (0u64, now(), now());
     while !stop.load(Ordering::Relaxed) {
         for addr in &configured {
             let target = addr.to_socket_addrs().ok().and_then(|mut a| a.next());
@@ -977,9 +1073,15 @@ fn connection_manager(
             last_save = t;
             shared.lock().unwrap().book.save();
         }
+        if t >= last_mempool + 60 {
+            last_mempool = t;
+            shared.lock().unwrap().save_mempool();
+        }
         std::thread::sleep(interval);
     }
-    shared.lock().unwrap().book.save();
+    let mut st = shared.lock().unwrap();
+    st.book.save();
+    st.save_mempool();
 }
 
 /// Derive the weights of the current and the next epoch off the lock, as soon as their seeds are known,
@@ -1066,5 +1168,23 @@ fn cpu_miner(shared: Shared, payee: Hash, stop: Arc<AtomicBool>, interval: Durat
             }
             nonce += CHUNK;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn misbehaviour_points() {
+        // hostile work is an immediate ban; a relayed bad transaction is not
+        assert_eq!(misbehaviour("invalid block"), Some(BAN_SCORE));
+        assert_eq!(misbehaviour("invalid header"), Some(BAN_SCORE));
+        assert_eq!(misbehaviour("invalid transaction"), Some(10));
+        assert_eq!(misbehaviour("message flood"), Some(1));
+        assert_eq!(misbehaviour("malformed addresses"), Some(20));
+        // not the peer's fault: the connection just ends
+        assert_eq!(misbehaviour("protocol version"), None);
+        assert_eq!(misbehaviour("connected to self"), None);
     }
 }

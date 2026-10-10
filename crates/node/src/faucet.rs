@@ -4,8 +4,10 @@
 //! change).
 
 use crate::node::{now, State};
+use crate::rpc::{hex, unhex};
 use ed25519_dalek::SigningKey;
 use requant_consensus::tx::{pkh, Hash, Input, OutPoint, Output, Tx};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
@@ -31,13 +33,15 @@ pub struct Faucet {
     pub given_today: u64,
     /// Recent payments: (time, recipient, txid), newest last.
     pub recent: Vec<(u64, Hash, Hash)>,
+    /// Where limits and history are kept across restarts.
+    path: std::path::PathBuf,
 }
 
 impl Faucet {
-    pub fn new(cfg: FaucetConfig) -> Faucet {
+    pub fn new(cfg: FaucetConfig, path: std::path::PathBuf) -> Faucet {
         let key = SigningKey::from_bytes(&cfg.key);
         let owner = pkh(&key.verifying_key().to_bytes());
-        Faucet {
+        let mut f = Faucet {
             cfg,
             key,
             owner,
@@ -46,6 +50,50 @@ impl Faucet {
             day: 0,
             given_today: 0,
             recent: Vec::new(),
+            path,
+        };
+        f.load();
+        f
+    }
+
+    fn save(&self) {
+        let v = json!({
+            "day": self.day,
+            "given_today": self.given_today,
+            "last_ip": self.last_ip.iter().map(|(ip, t)| (ip.to_string(), json!(t))).collect::<serde_json::Map<_, _>>(),
+            "last_to": self.last_to.iter().map(|(m, t)| (hex(m), json!(t))).collect::<serde_json::Map<_, _>>(),
+            "recent": self.recent.iter().map(|(t, to, id)| json!([t, hex(to), hex(id)])).collect::<Vec<_>>(),
+        });
+        let tmp = self.path.with_extension("tmp");
+        if std::fs::write(&tmp, v.to_string()).is_ok() {
+            let _ = std::fs::rename(&tmp, &self.path);
+        }
+    }
+
+    fn load(&mut self) {
+        let Some(v) = std::fs::read_to_string(&self.path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        else {
+            return;
+        };
+        let h32 = |s: &str| -> Option<Hash> { unhex(s).ok()?.try_into().ok() };
+        self.day = v["day"].as_u64().unwrap_or(0);
+        self.given_today = v["given_today"].as_u64().unwrap_or(0);
+        for (k, t) in v["last_ip"].as_object().into_iter().flatten() {
+            if let (Ok(ip), Some(t)) = (k.parse(), t.as_u64()) {
+                self.last_ip.insert(ip, t);
+            }
+        }
+        for (k, t) in v["last_to"].as_object().into_iter().flatten() {
+            if let (Some(m), Some(t)) = (h32(k), t.as_u64()) {
+                self.last_to.insert(m, t);
+            }
+        }
+        for r in v["recent"].as_array().into_iter().flatten() {
+            if let (Some(t), Some(to), Some(id)) =
+                (r[0].as_u64(), r[1].as_str().and_then(h32), r[2].as_str().and_then(h32))
+            {
+                self.recent.push((t, to, id));
+            }
         }
     }
 }
@@ -122,5 +170,6 @@ fn pay(st: &mut State, f: &mut Faucet, ip: IpAddr, to: Hash) -> Result<Hash, Str
     if f.recent.len() > 20 {
         f.recent.remove(0);
     }
+    f.save();
     Ok(txid)
 }

@@ -85,6 +85,18 @@ impl Mempool {
         self.bytes
     }
 
+    /// Pooled transactions in arrival order (parents before children), for saving the pool.
+    pub fn ordered(&self) -> Vec<&Tx> {
+        let mut v: Vec<&Entry> = self.txs.values().collect();
+        v.sort_unstable_by_key(|e| e.seq);
+        v.into_iter().map(|e| &e.tx).collect()
+    }
+
+    /// Changes whenever a transaction is added or removed (to save only when needed).
+    pub fn version(&self) -> (u64, usize) {
+        (self.seq, self.txs.len())
+    }
+
     /// Pooled transactions, newest first: (txid, fee, size in bytes).
     pub fn list(&self) -> Vec<(Hash, u64, usize)> {
         let mut v: Vec<_> = self.txs.iter().map(|(id, e)| (e.seq, *id, e.fee, e.size)).collect();

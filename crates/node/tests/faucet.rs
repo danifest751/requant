@@ -68,5 +68,34 @@ fn faucet_sends_once_a_day() {
     let junk = post(explorer, "to=%3Cscript%3E");
     assert!(junk.contains("not a test-network address") && !junk.contains("<script>"), "{junk}");
     n.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    drop(n);
+    // the daily limit survives a restart
+    let explorer2: SocketAddr = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap()
+    };
+    let n2 = start(Config {
+        net: Network::regtest(),
+        datadir: dir.clone(),
+        listen: "127.0.0.1:0".parse().unwrap(),
+        rpc: None,
+        rpc_token: None,
+        connect: vec![],
+        mine_to: None,
+        mine_interval: Duration::from_millis(30),
+        threads: 1,
+        max_reorg: 100,
+        peer_interval: Duration::from_millis(300),
+        discover: false,
+        explorer: Some(explorer2),
+        pool: None,
+        auto_update: false,
+        release_key: requant_node::release::RELEASE_KEY,
+        faucet: Some(FaucetConfig { key: fkey, amount: 100_000_000, daily: 1_000_000_000 }),
+    })
+    .unwrap();
+    let after = post(explorer2, &format!("to={to}"));
+    assert!(after.contains("one request a day"), "{after}");
+    n2.stop.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = std::fs::remove_dir_all(&dir);
 }
