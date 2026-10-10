@@ -47,6 +47,10 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 const PING_EVERY: u64 = 120;
 /// How long an address that sent invalid data is refused.
 const BAN_SECS: u64 = 3600;
+/// Bytes sent to peers by this process (see `State::uploaded`), and the upload period.
+static UPLOADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+const UPLOAD_PERIOD: u64 = 30 * 86_400;
+
 /// Misbehaviour points that get a peer banned.
 pub const BAN_SCORE: u32 = 100;
 /// Messages a peer may send per second on average, and at once.
@@ -120,6 +124,8 @@ pub struct Config {
     pub faucet: Option<crate::faucet::FaucetConfig>,
     /// Where the watchman's events are sent (see `watch`).
     pub notify: crate::watch::NotifyConfig,
+    /// Bytes the node may send to peers per 30 days; beyond, it serves only recent blocks.
+    pub max_upload: Option<u64>,
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -201,6 +207,14 @@ pub struct State {
     pub faucet: Option<crate::faucet::Faucet>,
     /// What the watchman found (see `watch`).
     pub events: crate::watch::Events,
+    /// Verification threads as configured, and whether the machine is busy (then one thread; see `load`).
+    pub base_threads: usize,
+    pub busy: bool,
+    /// Upload limit per 30 days (`--max-upload`), the period's start and what earlier runs sent in it.
+    pub max_upload: Option<u64>,
+    upload_path: PathBuf,
+    upload_start: u64,
+    upload_base: u64,
     allow_local: bool,
     pub started: u64,
     pub pool: Option<crate::pool::Pool>,
@@ -257,6 +271,40 @@ impl State {
 
     pub fn banned(&self, ip: &IpAddr) -> bool {
         self.bans.get(ip).is_some_and(|&t| t > now())
+    }
+
+    /// Bytes sent to peers in the current 30-day period.
+    pub fn uploaded(&self) -> u64 {
+        self.upload_base + UPLOADED.load(Ordering::Relaxed)
+    }
+
+    /// Whether the upload limit is reached (then old blocks are not served).
+    pub fn upload_capped(&self) -> bool {
+        self.max_upload.is_some_and(|m| self.uploaded() >= m)
+    }
+
+    fn load_upload(&mut self) {
+        let t = now();
+        let text = std::fs::read_to_string(&self.upload_path).unwrap_or_default();
+        let mut f = text.split_whitespace().map(|x| x.parse::<u64>().ok());
+        match (f.next().flatten(), f.next().flatten()) {
+            (Some(start), Some(bytes)) if t.saturating_sub(start) < UPLOAD_PERIOD => {
+                self.upload_start = start;
+                self.upload_base = bytes;
+            }
+            _ => self.upload_start = t,
+        }
+    }
+
+    /// Write the period's upload to `upload.txt`, starting a new period after 30 days.
+    pub fn save_upload(&mut self) {
+        let t = now();
+        if t.saturating_sub(self.upload_start) >= UPLOAD_PERIOD {
+            self.upload_start = t;
+            self.upload_base = 0;
+            UPLOADED.store(0, Ordering::Relaxed);
+        }
+        let _ = std::fs::write(&self.upload_path, format!("{} {}\n", self.upload_start, self.uploaded()));
     }
 
     /// Write the mempool to `mempool.dat` if it changed (each transaction as LE32 length and bytes, in arrival
@@ -694,6 +742,10 @@ impl State {
                         continue;
                     }
                     if let Some(b) = self.chain.block(&id) {
+                        // over the upload limit: only recent blocks (so the network keeps moving)
+                        if self.upload_capped() && b.header.height + 100 < self.chain.height() {
+                            continue;
+                        }
                         let bytes = b.encode();
                         sent += bytes.len();
                         self.send(peer, Msg::Block(bytes));
@@ -785,6 +837,7 @@ fn spawn_peer(shared: Shared, stream: TcpStream, outbound: bool) -> io::Result<(
             let size = m.approx_size();
             let ok = write_msg(&mut writer, &magic, &m).is_ok();
             queued.fetch_sub(size, Ordering::Relaxed);
+            UPLOADED.fetch_add(size as u64, Ordering::Relaxed);
             if !ok {
                 // also ends the reader, which removes the peer
                 let _ = writer.get_ref().shutdown(std::net::Shutdown::Both);
@@ -997,7 +1050,14 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         release_key: cfg.release_key,
         faucet: cfg.faucet.clone().map(|f| crate::faucet::Faucet::new(f, dir.join("faucet.json"))),
         events: crate::watch::Events::default(),
+        base_threads: cfg.threads.max(1),
+        busy: false,
+        max_upload: cfg.max_upload,
+        upload_path: dir.join("upload.txt"),
+        upload_start: 0,
+        upload_base: 0,
     };
+    state.load_upload();
     let restored = state.load_mempool();
     if restored > 0 {
         eprintln!("mempool: {restored} transactions restored");
@@ -1114,7 +1174,9 @@ fn connection_manager(
         }
         if t >= last_save + 300 {
             last_save = t;
-            shared.lock().unwrap().book.save();
+            let mut st = shared.lock().unwrap();
+            st.book.save();
+            st.save_upload();
         }
         if t >= last_mempool + 60 {
             last_mempool = t;

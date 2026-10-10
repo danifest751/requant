@@ -92,7 +92,7 @@ fn send(cfg: &NotifyConfig, e: &Event, height: u64) {
 /// The watch loop (every 30 s): stale tip, no peers, a jump in the network rate, re-verification of a random
 /// block's work (every 30 min), the supply audit (every 10 min), then pending notifications.
 pub fn watch(shared: Shared, cfg: NotifyConfig, stop: Arc<AtomicBool>) {
-    let (mut stale_said, mut alone_said) = (false, false);
+    let (mut stale_said, mut alone_said, mut upload_said) = (false, false, false);
     let mut rates: VecDeque<(u64, f64)> = VecDeque::new();
     let (mut last_verify, mut last_audit) = (now(), 0u64);
     let mut rng = crate::node::random_u64() | 1;
@@ -150,8 +150,35 @@ pub fn watch(shared: Shared, cfg: NotifyConfig, stop: Arc<AtomicBool>) {
                 }
             }
         }
+        // step back while the machine is busy: one verification thread, no background re-verification
+        let busy = crate::load::pressure().is_some_and(|p| p.busy());
+        {
+            let mut st = shared.lock().unwrap();
+            if busy != st.busy {
+                st.busy = busy;
+                let n = if busy { 1 } else { st.base_threads };
+                st.chain.set_threads(n);
+                st.headers.set_threads(n);
+                let text = if busy {
+                    "the machine is busy: verifying with one thread, background checks paused".to_string()
+                } else {
+                    format!("the machine has room again: verifying with {n} threads")
+                };
+                st.events.push(Level::Info, text);
+            }
+            if let Some(m) = st.max_upload {
+                let over = st.uploaded() >= m;
+                if over && !upload_said {
+                    st.events.push(
+                        Level::Info,
+                        format!("upload limit of {} GiB reached: serving recent blocks only", m >> 30),
+                    );
+                }
+                upload_said = over;
+            }
+        }
         // the work of a random block of the current epoch, verified again from scratch
-        if t >= last_verify + 1800 {
+        if t >= last_verify + 1800 && !busy {
             last_verify = t;
             rng ^= rng << 13;
             rng ^= rng >> 7;

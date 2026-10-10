@@ -19,6 +19,7 @@ fn main() {
     let mut max_reorg = None::<u64>;
     let (mut rpc_token, mut discover, mut auto_update) = (None::<String>, true, false);
     let mut notify = requant_node::watch::NotifyConfig::default();
+    let mut max_upload = None::<u64>;
     let mut explorer = None;
     let (mut pool_addr, mut pool_key, mut pool_fee, mut share_bits) = (None, None::<[u8; 32]>, 1.0f64, 24u32);
     let (mut min_payout, mut payout_every) = (100_000_000u64, 600u64);
@@ -66,6 +67,9 @@ fn main() {
                 payout_every = value(k).parse().unwrap_or_else(|_| usage("bad --pool-payout-every"))
             }
             "--notify-url" => notify.url = Some(value(k)),
+            "--max-upload" => {
+                max_upload = Some(parse_bytes(&value(k)).unwrap_or_else(|| usage("bad --max-upload (e.g. 50G)")))
+            }
             "--notify-telegram" => {
                 let v = value(k);
                 let (token, chat) = v.rsplit_once(':').unwrap_or_else(|| usage("--notify-telegram TOKEN:CHAT_ID"));
@@ -153,6 +157,7 @@ fn main() {
         auto_update,
         release_key: requant_node::release::RELEASE_KEY,
         notify,
+        max_upload,
         faucet: faucet_key.map(|key| requant_node::faucet::FaucetConfig {
             key,
             amount: faucet_amount,
@@ -181,6 +186,19 @@ fn main() {
     }
 }
 
+/// `50G`, `500M`, `2T` or a plain number of bytes.
+fn parse_bytes(s: &str) -> Option<u64> {
+    let s = s.trim();
+    let (num, mul) = match s.chars().last()?.to_ascii_uppercase() {
+        'K' => (&s[..s.len() - 1], 1u64 << 10),
+        'M' => (&s[..s.len() - 1], 1 << 20),
+        'G' => (&s[..s.len() - 1], 1 << 30),
+        'T' => (&s[..s.len() - 1], 1 << 40),
+        _ => (s, 1),
+    };
+    num.parse::<u64>().ok()?.checked_mul(mul)
+}
+
 fn usage(msg: &str) -> ! {
     if !msg.is_empty() {
         eprintln!("requantd: {msg}");
@@ -189,7 +207,7 @@ fn usage(msg: &str) -> ! {
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
          \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
 \n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--auto-update] [--version]
-                         [--faucet-key FILE [--faucet-amount RQT] [--faucet-daily RQT]] [--notify-url URL] [--notify-telegram TOKEN:CHAT]"
+                         [--faucet-key FILE [--faucet-amount RQT] [--faucet-daily RQT]] [--notify-url URL] [--notify-telegram TOKEN:CHAT] [--max-upload 50G]"
     );
     std::process::exit(2)
 }

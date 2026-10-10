@@ -88,6 +88,7 @@ fn pool_shares_blocks_and_payouts() {
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
         notify: Default::default(),
+        max_upload: None,
         faucet: None,
     })
     .unwrap();

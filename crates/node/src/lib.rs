@@ -6,6 +6,7 @@ pub mod epochs;
 pub mod explorer;
 pub mod faucet;
 pub mod index;
+pub mod load;
 pub mod mempool;
 pub mod msg;
 pub mod node;

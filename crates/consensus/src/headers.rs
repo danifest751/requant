@@ -231,6 +231,10 @@ impl HeaderChain {
         true
     }
 
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads.max(1);
+    }
+
     pub fn threads(&self) -> usize {
         self.threads
     }

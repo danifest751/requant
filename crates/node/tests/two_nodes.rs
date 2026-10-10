@@ -45,6 +45,7 @@ fn node_with(dir: &Path, connect: Vec<String>, mine_to: Option<Hash>, release_ke
         auto_update: false,
         release_key,
         notify: Default::default(),
+        max_upload: None,
         faucet: None,
     })
     .unwrap()
@@ -310,6 +311,7 @@ fn headers_first_sync_from_two_peers() {
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
         notify: Default::default(),
+        max_upload: None,
         faucet: None,
     })
     .unwrap();

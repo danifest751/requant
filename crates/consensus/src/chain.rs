@@ -104,6 +104,11 @@ impl Chain {
         c
     }
 
+    /// Threads for verifying work claims (lowered while the machine is busy).
+    pub fn set_threads(&mut self, threads: usize) {
+        self.threads = threads.max(1);
+    }
+
     pub fn tip(&self) -> Hash {
         *self.active.last().unwrap()
     }
