@@ -1,6 +1,7 @@
 //! Requant wallet library: keys, bech32m addresses (BIP 350), amounts, and building signed transfers from
 //! the node's UTXO listing; wallets of many addresses from one backup phrase (`hd`, `wallet`).
 
+pub mod backend;
 pub mod hd;
 pub mod wallet;
 

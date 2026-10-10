@@ -203,7 +203,7 @@ fn respond(mut stream: TcpStream, status: &str, v: Option<&Value>) -> io::Result
 
 /// A transaction as RPC shows it: inputs with the values and owners of the coins they spend (from the
 /// index or the pool), outputs, fee, and where it is (`height`: `None` while pooled or not yet sent).
-fn tx_json(st: &crate::node::State, tx: &Tx, height: Option<u64>) -> Value {
+pub(crate) fn tx_json(st: &crate::node::State, tx: &Tx, height: Option<u64>) -> Value {
     let tip = st.chain.height();
     let mut total_in = 0u64;
     let inputs: Vec<Value> = match tx {
@@ -234,7 +234,7 @@ fn tx_json(st: &crate::node::State, tx: &Tx, height: Option<u64>) -> Value {
 
 /// Spendable coins of `owner`: confirmed unspent outputs (minus those spent by pooled transactions) and
 /// unconfirmed outputs of pooled transactions; both are spendable by a new transaction.
-fn utxos_of(st: &crate::node::State, owner: &Hash) -> Vec<Value> {
+pub(crate) fn utxos_of(st: &crate::node::State, owner: &Hash) -> Vec<Value> {
     let next = st.chain.height() + 1;
     let maturity = st.chain.net.maturity;
     let mut v: Vec<Value> = st
@@ -257,6 +257,65 @@ fn utxos_of(st: &crate::node::State, owner: &Hash) -> Vec<Value> {
     v
 }
 
+/// Confirmed, unconfirmed (spendable) and immature amounts of `owner`.
+pub(crate) fn balance_of(st: &crate::node::State, owner: &Hash) -> Value {
+    let (mut confirmed, mut unconfirmed, mut immature) = (0u64, 0u64, 0u64);
+    for c in utxos_of(st, owner) {
+        let v = c["value"].as_u64().unwrap_or(0);
+        match (c["spendable"] == true, c["confirmed"] == true) {
+            (false, _) => immature += v,
+            (true, false) => unconfirmed += v,
+            (true, true) => confirmed += v,
+        }
+    }
+    json!({"confirmed": confirmed, "unconfirmed": unconfirmed, "immature": immature})
+}
+
+/// `owner`'s transactions, newest first (pooled ones first): received and sent per transaction.
+pub(crate) fn history_of(st: &crate::node::State, owner: &Hash, limit: usize) -> Vec<Value> {
+    let tip = st.chain.height();
+    let mut v: Vec<Value> = st
+        .mempool
+        .activity(&st.chain, owner)
+        .into_iter()
+        .rev()
+        .map(|(txid, r, s, _)| {
+            json!({"txid": hex(&txid), "height": null, "confirmations": 0, "time": null, "received": r, "sent": s})
+        })
+        .collect();
+    for e in st.index.history(owner, limit) {
+        let time = st.chain.active_id(e.height).and_then(|id| st.chain.block(&id)).map(|b| b.header.time);
+        v.push(json!({"txid": hex(&e.txid), "height": e.height, "confirmations": tip - e.height + 1,
+                      "time": time, "received": e.received, "sent": e.sent}));
+    }
+    v.truncate(limit);
+    v
+}
+
+/// Owners asked about in one call, at most.
+pub(crate) const MAX_OWNERS: usize = 200;
+
+/// One owner (a hex key hash) or a list of them (`utxos`, `history` for a whole wallet in one call).
+fn owners_param(v: &Value) -> Result<Option<Vec<Hash>>, String> {
+    match v.as_array() {
+        None => Ok(None),
+        Some(a) if a.len() > MAX_OWNERS => Err(format!("expected at most {MAX_OWNERS} key hashes")),
+        Some(a) => a.iter().map(hash_param).collect::<Result<_, _>>().map(Some),
+    }
+}
+
+/// `f` of each owner, flattened, every entry marked with its `owner`.
+pub(crate) fn per_owner(owners: &[Hash], mut f: impl FnMut(&Hash) -> Vec<Value>) -> Vec<Value> {
+    let mut all = Vec::new();
+    for o in owners {
+        for mut e in f(o) {
+            e["owner"] = json!(hex(o));
+            all.push(e);
+        }
+    }
+    all
+}
+
 /// A block id from a height or a hex id.
 fn block_param(st: &crate::node::State, v: &Value) -> Result<Hash, String> {
     match v.as_u64() {
@@ -268,15 +327,21 @@ fn block_param(st: &crate::node::State, v: &Value) -> Result<Hash, String> {
     }
 }
 
+/// Wait, without holding the node's lock, until the best tip is no longer the block `longpollid` (hex) or
+/// `LONG_POLL` has passed.
+pub fn long_poll(shared: &Shared, longpollid: &str) {
+    let since = std::time::Instant::now();
+    while hex(&shared.lock().unwrap().chain.tip()) == longpollid && since.elapsed() < LONG_POLL {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
 fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
     let arg = |k: usize| p.get(k).ok_or_else(|| format!("missing parameter {k}"));
-    // long poll: `getwork payee <longpollid>` waits (without the lock) until the tip is no longer that block
+    // long poll: `getwork payee <longpollid>` waits until the tip is no longer that block
     if method == "getwork" {
         if let Some(lp) = p.get(1).and_then(Value::as_str) {
-            let since = std::time::Instant::now();
-            while hex(&shared.lock().unwrap().chain.tip()) == lp && since.elapsed() < LONG_POLL {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
+            long_poll(shared, lp);
         }
     }
     let mut st = shared.lock().unwrap();
@@ -430,16 +495,7 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
         }
         "getbalance" => {
             let owner = hash_param(arg(0)?)?;
-            let (mut confirmed, mut unconfirmed, mut immature) = (0u64, 0u64, 0u64);
-            for c in utxos_of(&st, &owner) {
-                let v = c["value"].as_u64().unwrap_or(0);
-                match (c["spendable"] == true, c["confirmed"] == true) {
-                    (false, _) => immature += v,
-                    (true, false) => unconfirmed += v,
-                    (true, true) => confirmed += v,
-                }
-            }
-            Ok(json!({"confirmed": confirmed, "unconfirmed": unconfirmed, "immature": immature}))
+            Ok(balance_of(&st, &owner))
         }
         "stop" => {
             // only from this machine: a remote client must not be able to stop the node
@@ -458,25 +514,11 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             Ok(tx_json(&st, &tx, height))
         }
         "history" => {
-            let owner = hash_param(arg(0)?)?;
             let limit = p.get(1).and_then(|v| v.as_u64()).unwrap_or(100) as usize;
-            let tip = st.chain.height();
-            let mut v: Vec<Value> = st
-                .mempool
-                .activity(&st.chain, &owner)
-                .into_iter()
-                .rev()
-                .map(|(txid, r, s, _)| {
-                    json!({"txid": hex(&txid), "height": null, "confirmations": 0, "time": null, "received": r, "sent": s})
-                })
-                .collect();
-            for e in st.index.history(&owner, limit) {
-                let time = st.chain.active_id(e.height).and_then(|id| st.chain.block(&id)).map(|b| b.header.time);
-                v.push(json!({"txid": hex(&e.txid), "height": e.height, "confirmations": tip - e.height + 1,
-                              "time": time, "received": e.received, "sent": e.sent}));
+            match owners_param(arg(0)?)? {
+                Some(list) => Ok(json!(per_owner(&list, |o| history_of(&st, o, limit)))),
+                None => Ok(json!(history_of(&st, &hash_param(arg(0)?)?, limit))),
             }
-            v.truncate(limit);
-            Ok(json!(v))
         }
         "getwork" => {
             let payee = hash_param(arg(0)?)?;
@@ -510,10 +552,10 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             let tx = Tx::decode_exact(&unhex(arg(0)?.as_str().ok_or("expected hex")?)?).map_err(|e| e.to_string())?;
             st.process_tx(tx, None).map(|id| json!(hex(&id))).map_err(|e| e.to_string())
         }
-        "utxos" => {
-            let owner = hash_param(arg(0)?)?;
-            Ok(json!(utxos_of(&st, &owner)))
-        }
+        "utxos" => match owners_param(arg(0)?)? {
+            Some(list) => Ok(json!(per_owner(&list, |o| utxos_of(&st, o)))),
+            None => Ok(json!(utxos_of(&st, &hash_param(arg(0)?)?))),
+        },
         "getpeerinfo" | "peers" => {
             let v: Vec<Value> = st
                 .peers()

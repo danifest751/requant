@@ -63,7 +63,8 @@ address. A node runs one with `--faucet-key FILE` (an unencrypted key; `--faucet
 
 ## Wallet
 
-The wallet talks to a node's RPC (`--rpc HOST:PORT`, default `127.0.0.1:19334`); the test network is the
+The wallet talks to a node's RPC (`--rpc HOST:PORT`, default `127.0.0.1:19334`), or without a node of
+one's own to a node's public API: `--api http://193.187.93.29:19380` (see below). The test network is the
 default (`--network regtest` for local tests).
 
 A wallet is one file with many addresses, all restored from one 24-word backup phrase (BIP 39; keys by
@@ -114,6 +115,30 @@ The fee follows the transaction's size, at least 1000 atoms: `--fee-rate` takes 
 with a node that has no estimate). A
 transaction takes at most 600 inputs; with more coins, `send ... all` and `consolidate` handle the first
 600, so run them again. `--yes` skips the question (scripts).
+
+## Public API
+
+A node with an explorer (`--explorer ADDR`) also answers JSON under `/api/` on that port, open to any
+origin and rate-limited per client address (a burst of 120 requests, then 20 a second; 429 beyond):
+
+| Request | Answer |
+|---|---|
+| `GET /api/info` | network, height, tip, version, pool size, fee rate for 3 blocks |
+| `GET /api/fee?blocks=N` | the fee rate (atoms per byte) to get in within N blocks |
+| `GET /api/block/<height or id>` | header fields, confirmations, txids |
+| `GET /api/tx/<txid>` | inputs (with the values and owners they spend), outputs, fee, height |
+| `GET /api/address/<address or key hash>/balance` | confirmed, unconfirmed, immature atoms |
+| `GET /api/address/<...>/utxos`, `/history?limit=N` | spendable coins; transactions, newest first |
+| `GET /api/utxos?owners=K1,K2,...`, `/api/history?owners=...&limit=N` | up to 200 owners at once, entries name their `owner` |
+| `POST /api/tx` (body: hex, or `{"hex": ...}`) | relays a signed transaction: `{"txid": ...}` |
+
+```sh
+curl -s http://193.187.93.29:19380/api/info
+curl -s http://193.187.93.29:19380/api/address/trq1q8pqnx3uqer6jcxszen4tg3hylh5q645ae23yvra62a2nu98slqaqvvyume/balance
+```
+
+The answers are that node's view: a wallet using it trusts it for balances and history (it cannot spend:
+keys never leave the wallet), and the node learns which addresses are asked about.
 
 ## Get the miner
 

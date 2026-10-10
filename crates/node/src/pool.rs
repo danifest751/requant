@@ -389,7 +389,21 @@ fn current_job(st: &mut State, pool: &mut Pool) -> usize {
     pool.jobs.len() - 1
 }
 
-fn getwork(shared: &Shared) -> Result<Value, String> {
+/// Long polls waiting at once; beyond this `getwork` answers at once, so waiting miners cannot take every
+/// connection the pool serves.
+const MAX_LONG_POLLS: usize = 192;
+static LONG_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The current job. With the `longpollid` of the last job as the second parameter (the first, the payee,
+/// is not needed here), wait for the next block first (see `rpc::long_poll`).
+fn getwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
+    use std::sync::atomic::Ordering::SeqCst;
+    if let Some(lp) = p.get(1).and_then(Value::as_str) {
+        if LONG_POLLS.fetch_add(1, SeqCst) < MAX_LONG_POLLS {
+            crate::rpc::long_poll(shared, lp);
+        }
+        LONG_POLLS.fetch_sub(1, SeqCst);
+    }
     let mut st = shared.lock().unwrap();
     with_pool(&mut st, |st, pool| {
         let k = current_job(st, pool);
@@ -400,6 +414,7 @@ fn getwork(shared: &Shared) -> Result<Value, String> {
             "header": hex(&j.block.header.encode()),
             "header_digest": hex(&j.digest),
             "epoch_seed": hex(&j.seed),
+            "longpollid": hex(&j.block.header.prev),
             "target": hex(&j.share_target.to_be_bytes()),
             "network_target": hex(&j.block.header.target.to_be_bytes()),
             "share_bits": pool.cfg.share_bits,
@@ -931,7 +946,7 @@ pub fn miner_stats(st: &State, owner: &Hash) -> Option<Value> {
 pub fn serve(shared: Shared, addr: SocketAddr) -> std::io::Result<SocketAddr> {
     let s2 = shared.clone();
     let handler: Handler = Arc::new(move |method: &str, params: &[Value]| match method {
-        "getwork" => getwork(&s2),
+        "getwork" => getwork(&s2, params),
         "submitwork" => submitwork(&s2, params),
         "getinfo" => {
             let st = s2.lock().unwrap();
@@ -951,7 +966,8 @@ pub fn serve(shared: Shared, addr: SocketAddr) -> std::io::Result<SocketAddr> {
         }
         _ => Err(format!("unknown method {method}")),
     });
-    let at = serve_with(addr, vec![], 64 << 10, 64, handler)?;
+    // connections at once: room for the long polls and for submits next to them
+    let at = serve_with(addr, vec![], 64 << 10, MAX_LONG_POLLS + 64, handler)?;
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
         let mut st = shared.lock().unwrap();

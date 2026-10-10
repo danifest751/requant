@@ -17,7 +17,7 @@ fn dir() -> PathBuf {
     d
 }
 
-fn node(data: &Path, mine_to: [u8; 32]) -> Handle {
+fn node(data: &Path, mine_to: [u8; 32], explorer: std::net::SocketAddr) -> Handle {
     start(Config {
         net: Network::regtest(),
         datadir: data.to_path_buf(),
@@ -32,7 +32,7 @@ fn node(data: &Path, mine_to: [u8; 32]) -> Handle {
         rpc_cookie: false,
         peer_interval: Duration::from_millis(200),
         discover: false,
-        explorer: None,
+        explorer: Some(explorer),
         pool: None,
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
@@ -46,6 +46,8 @@ fn node(data: &Path, mine_to: [u8; 32]) -> Handle {
 struct Cli {
     dir: PathBuf,
     rpc: String,
+    /// When set, the wallet goes through this public API instead of the RPC.
+    api: Option<String>,
 }
 
 impl Cli {
@@ -53,6 +55,9 @@ impl Cli {
     fn run_env(&self, args: &[&str], env: &[(&str, &str)]) -> (bool, String, String) {
         let mut c = Command::new(env!("CARGO_BIN_EXE_requant-wallet"));
         c.current_dir(&self.dir).args(args).args(["--network", "regtest", "--rpc", &self.rpc]);
+        if let Some(a) = &self.api {
+            c.args(["--api", a]);
+        }
         c.env_remove("REQUANT_WALLET_PASSPHRASE").env_remove("REQUANT_WALLET_PHRASE");
         for (k, v) in env {
             c.env(k, v);
@@ -95,7 +100,7 @@ fn txid_of(out: &str) -> String {
 fn wallet_end_to_end() {
     let net = Network::regtest();
     let d = dir();
-    let mut cli = Cli { dir: d.clone(), rpc: "127.0.0.1:1".into() };
+    let mut cli = Cli { dir: d.clone(), rpc: "127.0.0.1:1".into(), api: None };
 
     // a new wallet shows 24 words and its first address
     let out = cli.ok(&["create", "w.json", "--no-passphrase"]);
@@ -110,7 +115,8 @@ fn wallet_end_to_end() {
     assert!(!cli.run_env(&["create", "w.json", "--no-passphrase"], &[]).0, "never overwrites");
 
     // mine to it
-    let h = node(&d.join("node"), parse_address(&net, &first).unwrap());
+    let explorer = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let h = node(&d.join("node"), parse_address(&net, &first).unwrap(), explorer);
     cli.rpc = h.rpc.unwrap().to_string();
     wait("mined coins to mature", || cli.confirmed("w.json") > 0);
 
@@ -163,6 +169,24 @@ fn wallet_end_to_end() {
     let (ok, _, err) =
         cli.run_env(&["restore", "x.json", "--no-passphrase"], &[("REQUANT_WALLET_PHRASE", "abandon art")]);
     assert!(!ok && err.contains("24 words"), "{err}");
+
+    // without a node of one's own: the same wallet through the explorer's public API (the RPC address is
+    // made unreachable to be sure)
+    cli.api = Some(format!("http://{explorer}"));
+    cli.rpc = "127.0.0.1:1".into();
+    assert_eq!(cli.confirmed(&outside), 200_000_000);
+    let hist = cli.ok(&["history", "w.json", "50"]);
+    assert!(hist.lines().any(|l| l.contains(&txid_of(&b))), "{hist}");
+    let paid = cli.ok(&["send", "w.json", &outside, "0.5", "--yes"]);
+    assert!(paid.starts_with("sent, txid"), "{paid}");
+    wait("the payment through the API to confirm", || cli.confirmed(&outside) == 250_000_000);
+    let (ok, out, err) = cli.run_env(&["restore", "r2.json", "--no-passphrase"], &[("REQUANT_WALLET_PHRASE", &phrase)]);
+    assert!(ok && out.contains("found 2 receive and 3 change"), "{out} {err}");
+    // what the API does not offer is said so
+    let (ok, _, err) = cli.run_env(&["tx", "nothex"], &[]);
+    assert!(!ok, "{err}");
+    cli.api = None;
+    cli.rpc = h.rpc.unwrap().to_string();
 
     // an encrypted wallet: the passphrase opens it, a wrong one does not, the file holds no plain secret
     let pw = [("REQUANT_WALLET_PASSPHRASE", "correct horse")];

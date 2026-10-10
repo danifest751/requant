@@ -67,6 +67,28 @@ fn handle(shared: &Shared, stream: TcpStream) -> io::Result<()> {
         }
     }
     let mut stream = stream;
+    if path.starts_with("/api/") {
+        let cors = "Access-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+                    Access-Control-Allow-Headers: Content-Type\r\n";
+        if method == "OPTIONS" {
+            return write!(stream, "HTTP/1.1 204 No Content\r\n{cors}Content-Length: 0\r\nConnection: close\r\n\r\n");
+        }
+        let (status, v) = if body_len > crate::api::MAX_POST {
+            ("413 Payload Too Large", serde_json::json!({"error": "request too large"}))
+        } else {
+            let mut body = vec![0u8; if method == "POST" { body_len } else { 0 }];
+            reader.read_exact(&mut body)?;
+            let ip = stream.peer_addr().map(|a| a.ip()).unwrap_or(std::net::IpAddr::from([0, 0, 0, 0]));
+            crate::api::answer(shared, &method, &path, &body, ip)
+        };
+        let body = v.to_string();
+        return write!(
+            stream,
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{cors}Content-Length: {}\r\n\
+             Cache-Control: no-cache\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
     if path == "/health" {
         let (status, body) = health(&shared.lock().unwrap());
         return write!(

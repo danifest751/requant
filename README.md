@@ -34,10 +34,13 @@ Nothing here is a security or investment claim.
 4. **Look around.** Blocks, transactions and any address on the
    [explorer](http://193.187.93.29:19380/); peers and pending transactions on the
    [network page](http://193.187.93.29:19380/network).
-5. **Run a node** (optional; the wallet sends payments through one): `requantd` from the same release,
-   `requantd --network test --connect 193.187.93.29:19333`, then `requant-wallet balance my.wallet` and
-   `requant-wallet send my.wallet <address> 1.5`. With `--auto-update` it installs new signed releases by
-   itself. Everything else: [`TESTNET.md`](TESTNET.md).
+5. **Send.** Without a node of your own the wallet uses the explorer's public API:
+   `requant-wallet balance my.wallet --api http://193.187.93.29:19380` and
+   `requant-wallet send my.wallet <address> 1.5 --api http://193.187.93.29:19380` (keys stay on your
+   machine; that node sees which addresses you ask about).
+6. **Run a node** (optional): `requantd` from the same release,
+   `requantd --network test --connect 193.187.93.29:19333`; the wallet then talks to it by default. With
+   `--auto-update` it installs new signed releases by itself. Everything else: [`TESTNET.md`](TESTNET.md).
 
 ## How the work function works
 

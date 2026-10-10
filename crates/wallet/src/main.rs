@@ -21,7 +21,8 @@
 //! send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]...; consolidate WALLET|KEYFILE.
 //!
 //! Options: --network test|regtest (default test, or the wallet's), --rpc HOST:PORT, --fee-rate
-//! ATOMS_PER_BYTE|fast|normal|slow (default normal: the node's `estimatefee` for 3 blocks), --yes (send
+//! ATOMS_PER_BYTE|fast|normal|slow (default normal: the node's `estimatefee` for 3 blocks), --api
+//! http://HOST:PORT (a node's public API instead of RPC: no node of one's own needed), --yes (send
 //! without asking), --out FILE, --rpc-cookie FILE (the node's `.cookie`, when it runs with `--rpc-cookie`).
 //! Environment (for scripts): REQUANT_WALLET_PASSPHRASE, REQUANT_WALLET_PHRASE (for restore),
 //! REQUANT_RPC_TOKEN, REQUANT_RPC_COOKIE.
@@ -29,13 +30,14 @@
 use ed25519_dalek::SigningKey;
 use requant_consensus::params::Network;
 use requant_consensus::tx::{Hash, OutPoint, Tx};
-use requant_node::rpc::{hex, request, unhex};
+use requant_node::rpc::{hex, unhex};
+use requant_wallet::backend::Backend;
 use requant_wallet::hd;
 use requant_wallet::wallet::{Unsigned, WalletFile};
 use requant_wallet::*;
 use serde_json::json;
 use std::collections::HashMap;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use zeroize::Zeroizing;
 
 fn die(msg: &str) -> ! {
@@ -146,11 +148,10 @@ fn save(path: &str, w: &WalletFile) {
 }
 
 /// `(coin, spendable now, confirmed)` of one owner.
-fn coins(rpc: SocketAddr, owner: &Hash) -> Vec<(Spendable, bool, bool)> {
-    let v = request(rpc, "utxos", json!([hex(owner)])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
-    v.as_array()
-        .unwrap()
-        .iter()
+fn coins(rpc: &Backend, owner: &Hash) -> Vec<(Spendable, bool, bool)> {
+    let v = rpc.call("utxos", json!([hex(owner)])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+    let Some(list) = v.as_array() else { die(&format!("unexpected answer to utxos: {v}")) };
+    list.iter()
         .map(|c| {
             let txid: [u8; 32] = unhex(c["txid"].as_str().unwrap()).unwrap().try_into().unwrap();
             let op = OutPoint { txid, vout: c["vout"].as_u64().unwrap() as u32 };
@@ -163,8 +164,29 @@ fn coins(rpc: SocketAddr, owner: &Hash) -> Vec<(Spendable, bool, bool)> {
         .collect()
 }
 
-fn all_coins(rpc: SocketAddr, owners: &[Hash]) -> Vec<(Spendable, bool, bool)> {
-    owners.iter().flat_map(|o| coins(rpc, o)).collect()
+/// Coins of many owners: a hundred per request (each entry names its owner), or one request per owner
+/// with a node too old for lists.
+fn all_coins(rpc: &Backend, owners: &[Hash]) -> Vec<(Spendable, bool, bool)> {
+    let mut all = Vec::new();
+    for chunk in owners.chunks(100) {
+        let list: Vec<String> = chunk.iter().map(|o| hex(o)).collect();
+        let Ok(v) = rpc.call("utxos", json!([list])) else {
+            return owners.iter().flat_map(|o| coins(rpc, o)).collect();
+        };
+        let Some(items) = v.as_array() else { die(&format!("unexpected answer to utxos: {v}")) };
+        for c in items {
+            let owner = c["owner"].as_str().and_then(|h| unhex(h).ok()).and_then(|b| b.try_into().ok());
+            let txid = c["txid"].as_str().and_then(|h| unhex(h).ok()).and_then(|b| <[u8; 32]>::try_from(b).ok());
+            let (Some(owner), Some(txid)) = (owner, txid) else { die(&format!("unexpected coin in utxos: {c}")) };
+            let op = OutPoint { txid, vout: c["vout"].as_u64().unwrap_or(0) as u32 };
+            all.push((
+                Spendable { op, value: c["value"].as_u64().unwrap_or(0), owner },
+                c["spendable"].as_bool().unwrap_or(false),
+                c["confirmed"].as_bool().unwrap_or(true),
+            ));
+        }
+    }
+    all
 }
 
 fn owners(src: &Source) -> Vec<Hash> {
@@ -188,8 +210,8 @@ fn confirm(question: &str, yes: bool) {
     }
 }
 
-fn send(rpc: SocketAddr, tx: &Tx) -> String {
-    let txid = request(rpc, "sendtx", json!([hex(&tx.encode())])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+fn send(rpc: &Backend, tx: &Tx) -> String {
+    let txid = rpc.call("sendtx", json!([hex(&tx.encode())])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
     txid.as_str().unwrap_or("").to_string()
 }
 
@@ -240,22 +262,45 @@ fn plan(
 }
 
 /// Next change address of a wallet, deriving more first when the seed is at hand.
-fn next_change(w: &mut WalletFile, seed: Option<&[u8; 64]>) -> Hash {
-    if let Some(s) = seed {
-        w.top_up(s);
+/// Next change address of a wallet, deriving more first when the seed is at hand. Addresses the node has
+/// seen used are skipped: a watch-only copy and the wallet it came from hand out change separately.
+fn next_change(w: &mut WalletFile, seed: Option<&[u8; 64]>, rpc: &Backend) -> Hash {
+    loop {
+        if let Some(s) = seed {
+            w.top_up(s);
+        }
+        let c = w.next_change().unwrap_or_else(|| {
+            die("no unused change address left in this copy: export a fresh watch-only copy from the signing wallet")
+        });
+        let used = rpc.call("history", json!([hex(&c), 1])).is_ok_and(|v| v.as_array().is_some_and(|a| !a.is_empty()));
+        if !used {
+            return c;
+        }
     }
-    w.next_change().unwrap_or_else(|| {
-        die("no unused change address left in this copy: export a fresh watch-only copy from the signing wallet")
-    })
 }
 
-fn print_history(rpc: SocketAddr, owners: &[Hash], limit: u64) {
+fn print_history(rpc: &Backend, owners: &[Hash], limit: u64) {
     // per transaction, what the whole wallet received and sent (moves between its own addresses net out)
     type Row = (Option<u64>, serde_json::Value, u64, u64);
     let mut by_tx: HashMap<String, Row> = HashMap::new();
-    for o in owners {
-        let v = request(rpc, "history", json!([hex(o), limit])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
-        for e in v.as_array().unwrap() {
+    // a hundred owners per request, or one request each with a node too old for lists
+    let mut answers = Vec::new();
+    for chunk in owners.chunks(100) {
+        let list: Vec<String> = chunk.iter().map(|o| hex(o)).collect();
+        match rpc.call("history", json!([list, limit])) {
+            Ok(v) => answers.push(v),
+            Err(_) => {
+                answers = owners
+                    .iter()
+                    .map(|o| rpc.call("history", json!([hex(o), limit])).unwrap_or_else(|e| die(&format!("rpc: {e}"))))
+                    .collect();
+                break;
+            }
+        }
+    }
+    for v in answers {
+        let Some(items) = v.as_array() else { die(&format!("unexpected answer to history: {v}")) };
+        for e in items {
             let id = e["txid"].as_str().unwrap_or("").to_string();
             let entry = by_tx.entry(id).or_insert((e["height"].as_u64(), e["confirmations"].clone(), 0, 0));
             entry.2 += e["received"].as_u64().unwrap_or(0);
@@ -285,6 +330,7 @@ fn main() {
         Some(v)
     };
     let net_opt = opt("--network");
+    let api = opt("--api");
     let rpc_opt = opt("--rpc");
     let out = opt("--out");
     if let Some(c) = opt("--rpc-cookie") {
@@ -308,7 +354,14 @@ fn main() {
     let net = Network::by_name(&net_name).unwrap_or_else(|| die("unknown network"));
     let default_rpc = if net.name == "test" { "127.0.0.1:19334" } else { "127.0.0.1:19445" };
     let rpc_s = rpc_opt.unwrap_or_else(|| default_rpc.into());
-    let rpc = || rpc_s.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| die("bad --rpc address"));
+    let rpc = || -> Backend {
+        match &api {
+            Some(url) => Backend::api(url).unwrap_or_else(|e| die(&format!("--api: {e}"))),
+            None => Backend::Rpc(
+                rpc_s.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| die("bad --rpc address")),
+            ),
+        }
+    };
     // the fee rate: a number of atoms per byte, or fast / normal / slow from the node's estimate (the next
     // 1, 3 or 10 blocks' worth of its pool), falling back to the default with a node that has no estimate
     let rate = || -> u64 {
@@ -318,7 +371,7 @@ fn main() {
             "slow" => 10,
             n => return n.parse().unwrap_or_else(|_| die("bad --fee-rate: a number, fast, normal or slow")),
         };
-        match request(rpc(), "estimatefee", json!([blocks])) {
+        match rpc().call("estimatefee", json!([blocks])) {
             Ok(v) => {
                 let r = v["feerate"].as_u64().unwrap_or(DEFAULT_FEE_RATE);
                 eprintln!("fee rate {r} atoms/byte ({fee_opt}: the next {blocks} block(s))");
@@ -376,9 +429,21 @@ fn main() {
             } else {
                 let seed = hd::seed_of(&entropy, "");
                 let addr = rpc();
-                w.scan(&seed, |o| {
-                    let v = request(addr, "history", json!([hex(o), 1])).map_err(|e| format!("rpc: {e}"))?;
-                    Ok(v.as_array().is_some_and(|a| !a.is_empty()))
+                w.scan(&seed, |batch| {
+                    // one request for the batch (entries name their owner); one per address with an older node
+                    let list: Vec<String> = batch.iter().map(|o| hex(o)).collect();
+                    if let Ok(v) = addr.call("history", json!([list, 1])) {
+                        let seen: std::collections::HashSet<&str> =
+                            v.as_array().into_iter().flatten().filter_map(|e| e["owner"].as_str()).collect();
+                        return Ok(list.iter().map(|o| seen.contains(o.as_str())).collect());
+                    }
+                    batch
+                        .iter()
+                        .map(|o| {
+                            let v = addr.call("history", json!([hex(o), 1])).map_err(|e| format!("rpc: {e}"))?;
+                            Ok(v.as_array().is_some_and(|a| !a.is_empty()))
+                        })
+                        .collect()
                 })
                 .unwrap_or_else(|e| die(&format!("{e} (use --no-scan to restore without a node)")));
                 println!("found {} receive and {} change addresses in use", w.receive_issued, w.change_issued);
@@ -414,11 +479,14 @@ fn main() {
         }
         ["addresses", path] => {
             let (_, w) = wallet_arg(&net, path);
-            let addr = rpc();
+            let mut held: HashMap<Hash, u64> = HashMap::new();
+            for (c, ..) in all_coins(&rpc(), &w.owners()) {
+                *held.entry(c.owner).or_default() += c.value;
+            }
             println!("{:<8}  {:>20}  address", "path", "amount RQT");
             for (chain, list, issued) in [("r", &w.receive, w.receive_issued), ("c", &w.change, w.change_issued)] {
                 for (i, o) in list.iter().enumerate() {
-                    let value: u64 = coins(addr, o).iter().map(|c| c.0.value).sum();
+                    let value = held.get(o).copied().unwrap_or(0);
                     // handed-out addresses always; derived-ahead ones only when they hold something
                     if (i as u32) < issued || value > 0 {
                         println!("{:<8}  {:>20}  {}", format!("{chain}/{i}"), format_amount(value), address(&net, o));
@@ -436,9 +504,9 @@ fn main() {
             let (path, mut w) = wallet_arg(&net, path);
             let addr = rpc();
             let spendable: Vec<Spendable> =
-                all_coins(addr, &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                all_coins(&addr, &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
             let pairs: Vec<(&str, &str)> = rest.chunks(2).map(|p| (p[0], p[1])).collect();
-            let (tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate(), || next_change(&mut w, None));
+            let (tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate(), || next_change(&mut w, None, &addr));
             // the transactions that created the coins spent, so the signer can check their values
             let mut prev: Vec<Tx> = Vec::new();
             for c in &chosen {
@@ -446,7 +514,7 @@ fn main() {
                     continue;
                 }
                 let v =
-                    request(addr, "gettx", json!([hex(&c.op.txid)])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+                    addr.call("gettx", json!([hex(&c.op.txid)])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
                 let bytes =
                     v["hex"].as_str().and_then(|h| unhex(h).ok()).unwrap_or_else(|| die("rpc: gettx gave no hex"));
                 let t = Tx::decode_exact(&bytes).unwrap_or_else(|e| die(&format!("rpc: {e}")));
@@ -496,7 +564,7 @@ fn main() {
             let bytes = unhex(text.trim()).unwrap_or_else(|_| die(&format!("{file}: not a signed transaction (hex)")));
             let tx = Tx::decode_exact(&bytes).unwrap_or_else(|e| die(&format!("{file}: {e}")));
             tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&format!("{file}: {e}")));
-            println!("sent, txid {}", send(rpc(), &tx));
+            println!("sent, txid {}", send(&rpc(), &tx));
         }
         // ---- single keys ------------------------------------------------------------------------
         ["keygen", path] => {
@@ -572,7 +640,7 @@ fn main() {
         }
         // ---- either -----------------------------------------------------------------------------
         ["balance", src] => {
-            let list = all_coins(rpc(), &owners(&source(&net, src)));
+            let list = all_coins(&rpc(), &owners(&source(&net, src)));
             let sum = |f: &dyn Fn(&(Spendable, bool, bool)) -> bool| {
                 list.iter().filter(|c| f(c)).map(|c| c.0.value).sum::<u64>()
             };
@@ -589,10 +657,10 @@ fn main() {
         }
         ["history", src, rest @ ..] if rest.len() <= 1 => {
             let limit: u64 = rest.first().map(|n| n.parse().unwrap_or_else(|_| die("bad count"))).unwrap_or(20);
-            print_history(rpc(), &owners(&source(&net, src)), limit);
+            print_history(&rpc(), &owners(&source(&net, src)), limit);
         }
         ["tx", txid] => {
-            let v = request(rpc(), "gettx", json!([txid])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+            let v = rpc().call("gettx", json!([txid])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
             let show = |owner: &serde_json::Value| -> String {
                 owner
                     .as_str()
@@ -619,7 +687,7 @@ fn main() {
             println!("  fee {:>20}", format_amount(v["fee"].as_u64().unwrap_or(0)));
         }
         ["coins", src] => {
-            let mut list = all_coins(rpc(), &owners(&source(&net, src)));
+            let mut list = all_coins(&rpc(), &owners(&source(&net, src)));
             list.sort_by_key(|c| std::cmp::Reverse(c.0.value));
             println!("{:>20}  {:<11}  outpoint", "amount RQT", "status");
             for (c, spendable, confirmed) in &list {
@@ -640,25 +708,25 @@ fn main() {
                     let key = load_key(&path);
                     let me = owner_of(&key);
                     let spendable: Vec<Spendable> =
-                        coins(rpc(), &me).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                        coins(&rpc(), &me).into_iter().filter(|c| c.1).map(|c| c.0).collect();
                     let (mut tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate(), || me);
                     show_payment(&net, &lines, fee, transfer_size(chosen.len(), lines.len()) as usize);
                     confirm("send?", yes);
                     let keys = HashMap::from([(me, key)]);
                     sign_with(&net, &mut tx, &chosen, &keys).unwrap_or_else(|e| die(&e));
-                    println!("sent, txid {}", send(rpc(), &tx));
+                    println!("sent, txid {}", send(&rpc(), &tx));
                 }
                 Source::Wallet(path, mut w) => {
                     let seed = unlock(&path, &w);
                     let spendable: Vec<Spendable> =
-                        all_coins(rpc(), &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                        all_coins(&rpc(), &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
                     let (mut tx, chosen, lines, fee) =
-                        plan(&net, spendable, &pairs, rate(), || next_change(&mut w, Some(&seed)));
+                        plan(&net, spendable, &pairs, rate(), || next_change(&mut w, Some(&seed), &rpc()));
                     show_payment(&net, &lines, fee, transfer_size(chosen.len(), lines.len()) as usize);
                     confirm("send?", yes);
                     sign_with(&net, &mut tx, &chosen, &w.keyring(&seed)).unwrap_or_else(|e| die(&e));
                     save(&path, &w);
-                    println!("sent, txid {}", send(rpc(), &tx));
+                    println!("sent, txid {}", send(&rpc(), &tx));
                 }
                 Source::Address(_) => die("send takes a wallet or a key file"),
             }
@@ -668,14 +736,14 @@ fn main() {
                 Source::Key(path) => {
                     let key = load_key(&path);
                     let me = owner_of(&key);
-                    let c: Vec<Spendable> = coins(rpc(), &me).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                    let c: Vec<Spendable> = coins(&rpc(), &me).into_iter().filter(|c| c.1).map(|c| c.0).collect();
                     (HashMap::from([(me, key)]), c, me, None)
                 }
                 Source::Wallet(path, mut w) => {
                     let seed = unlock(&path, &w);
                     let c: Vec<Spendable> =
-                        all_coins(rpc(), &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
-                    let to = next_change(&mut w, Some(&seed));
+                        all_coins(&rpc(), &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                    let to = next_change(&mut w, Some(&seed), &rpc());
                     (w.keyring(&seed), c, to, Some((path, w)))
                 }
                 Source::Address(_) => die("consolidate takes a wallet or a key file"),
@@ -698,7 +766,7 @@ fn main() {
             if let Some((path, w)) = wallet {
                 save(&path, &w);
             }
-            println!("sent, txid {}", send(rpc(), &tx));
+            println!("sent, txid {}", send(&rpc(), &tx));
         }
         _ => die(concat!(
             "usage: requant-wallet create WALLET [--no-passphrase] | restore WALLET [--no-scan] | phrase WALLET\n",

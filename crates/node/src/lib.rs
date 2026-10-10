@@ -2,6 +2,7 @@
 //! CPU miner for regtest. Consensus is `requant-consensus`.
 
 pub mod addrbook;
+pub mod api;
 pub mod epochs;
 pub mod explorer;
 pub mod faucet;

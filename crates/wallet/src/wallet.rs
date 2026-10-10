@@ -193,20 +193,34 @@ impl WalletFile {
 
     /// The addresses in use after a restore: on each chain, scan until `LOOKAHEAD` unused addresses in a
     /// row; everything up to the last used one counts as handed out (at least one receive address).
-    pub fn scan(&mut self, seed: &[u8; 64], mut used: impl FnMut(&Hash) -> Result<bool, String>) -> Result<(), String> {
+    /// `used` answers for `LOOKAHEAD` addresses at a time (one request to a node for each batch).
+    pub fn scan(
+        &mut self,
+        seed: &[u8; 64],
+        mut used: impl FnMut(&[Hash]) -> Result<Vec<bool>, String>,
+    ) -> Result<(), String> {
         for chain in [hd::RECEIVE, hd::CHANGE] {
-            let (mut index, mut gap, mut last) = (0u32, 0u32, None);
-            while gap < LOOKAHEAD {
+            let (mut index, mut last) = (0u32, None::<u32>);
+            loop {
                 let list = if chain == hd::RECEIVE { &mut self.receive } else { &mut self.change };
-                while list.len() <= index as usize {
+                while list.len() < (index + LOOKAHEAD) as usize {
                     list.push(owner_at(seed, chain, list.len() as u32));
                 }
-                if used(&list[index as usize])? {
-                    (last, gap) = (Some(index), 0);
-                } else {
-                    gap += 1;
+                let batch = &list[index as usize..(index + LOOKAHEAD) as usize];
+                let flags = used(batch)?;
+                if flags.len() != batch.len() {
+                    return Err("the node answered for a different number of addresses".into());
                 }
-                index += 1;
+                for (k, &u) in flags.iter().enumerate() {
+                    if u {
+                        last = Some(index + k as u32);
+                    }
+                }
+                index += LOOKAHEAD;
+                // LOOKAHEAD unused in a row after the last used one (or from the start): done
+                if index - last.map_or(0, |l| l + 1) >= LOOKAHEAD {
+                    break;
+                }
             }
             let issued = last.map_or(0, |i| i + 1);
             if chain == hd::RECEIVE {
@@ -372,7 +386,7 @@ mod tests {
         let mut fresh =
             WalletFile { receive: vec![], change: vec![], receive_issued: 1, change_issued: 0, ..w.watch_copy() };
         fresh.seed = w.seed.clone();
-        fresh.scan(&seed, |h| Ok(used.contains(h) || *h == far)).unwrap();
+        fresh.scan(&seed, |b| Ok(b.iter().map(|h| used.contains(h) || *h == far).collect())).unwrap();
         assert_eq!((fresh.receive_issued, fresh.change_issued), (20, 1));
         assert_eq!(fresh.receive.len(), 40);
         assert_eq!(fresh.next_receive(), Some(w.receive[20]));

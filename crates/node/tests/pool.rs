@@ -135,6 +135,26 @@ fn pool_shares_blocks_and_payouts() {
         assert_eq!(late["block"], false, "{late}");
     }
 
+    // long poll: a getwork with the current longpollid wakes when a share makes the next block
+    let work = request(pool_addr, "getwork", json!([hex(&alice)])).unwrap();
+    let lp = work["longpollid"].as_str().unwrap().to_string();
+    let waiter = {
+        let (lp, payee) = (lp.clone(), hex(&alice));
+        std::thread::spawn(move || request(pool_addr, "getwork", json!([payee, lp])).unwrap())
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!waiter.is_finished(), "waits while the tip stays");
+    let mut k = 0;
+    while submit(pool_addr, &alice, 2_000_000 + k * 1000)["block"] != true {
+        k += 1;
+    }
+    let next = waiter.join().unwrap();
+    assert_ne!(next["longpollid"].as_str(), Some(lp.as_str()));
+    // a stale id answers at once
+    let t0 = Instant::now();
+    request(pool_addr, "getwork", json!([hex(&alice), lp])).unwrap();
+    assert!(t0.elapsed() < Duration::from_secs(2));
+
     // matured credits are paid on chain to both miners, alice about twice bob
     let t = Instant::now();
     let paid = |who: &Hash| -> u64 {
