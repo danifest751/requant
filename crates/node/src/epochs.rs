@@ -90,6 +90,16 @@ fn paths(dir: &Path, seed: &Hash) -> (PathBuf, PathBuf) {
 /// are removed.
 pub fn open_or_derive(dir: &Path, seed: &Hash, p: Params, keep: &[Hash]) -> io::Result<Epoch> {
     std::fs::create_dir_all(dir)?;
+    // other epochs' files go first (the current one and the one being prepared stay), so the disk never
+    // holds more than two epochs either
+    for e in std::fs::read_dir(dir)?.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let stem = name.split('.').next().unwrap_or("");
+        let wanted = stem == hexs(seed) || keep.iter().any(|k| stem == hexs(k));
+        if !wanted {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
     let (file, sum) = paths(dir, seed);
     let size = (p.layers * p.n * p.n) as u64;
     let good = std::fs::metadata(&file).is_ok_and(|m| m.len() == size)
@@ -107,15 +117,6 @@ pub fn open_or_derive(dir: &Path, seed: &Hash, p: Params, keep: &[Hash]) -> io::
         let c = checksum(&tmp)?;
         std::fs::rename(&tmp, &file)?;
         std::fs::write(&sum, format!("{c}\n"))?;
-    }
-    // other epochs' files go (the current one and the one being prepared stay)
-    for e in std::fs::read_dir(dir)?.flatten() {
-        let name = e.file_name().to_string_lossy().to_string();
-        let stem = name.split('.').next().unwrap_or("");
-        let wanted = stem == hexs(seed) || keep.iter().any(|k| stem == hexs(k));
-        if !wanted {
-            let _ = std::fs::remove_file(e.path());
-        }
     }
     Ok(Epoch::from_source(p, Box::new(FileSource { file: File::open(&file)?, path: file, n: p.n })))
 }
