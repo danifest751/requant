@@ -94,6 +94,7 @@ impl Backend {
                 ("GET", format!("/api/address/{}/history?limit={}", p(0)?, p(1).unwrap_or("100".into())), None)
             }
             "gettx" => ("GET", format!("/api/tx/{}", p(0)?), None),
+            "getinfo" => ("GET", "/api/info".to_string(), None),
             "estimatefee" => ("GET", format!("/api/fee?blocks={}", p(0).unwrap_or("3".into())), None),
             "sendtx" => ("POST", "/api/tx".to_string(), Some(json!({"hex": p(0)?}).to_string())),
             _ => {

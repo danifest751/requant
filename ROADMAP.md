@@ -75,7 +75,9 @@ test network.
 - [x] Package relay (node 0.17.0, P2P protocol 5): a pre-signed parent below the minimum fee travels
       with its child (`sendpackage`, `POST /api/package`, `requant-wallet broadcast PARENT CHILD`).
 - [ ] Two-way channels on the revocable templates; routed payments over revocable HTLCs.
-- [ ] One-way payment channels for MagnetGate (deposit, expiry refund, payment states).
+- [x] One-way payment channels in the wallet (wallet 0.7.0): `channel open/accept/fund/pay/receive/close/
+      refund/show`; the deposit is sent only after the server signed the refund.
+- [ ] One-way channels in MagnetGate: the service accepts states for traffic; a wallet in the apps.
 - [ ] HTLC swaps with Bitcoin-family chains and EVM; maker bot; documented privacy limits.
 - [ ] RQT↔XMR swaps: ed25519 adaptor signatures, MuSig2 key aggregation, cancel/refund/punish
       transfers; external cryptographic review before real value.

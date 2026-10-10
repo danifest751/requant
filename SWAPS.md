@@ -1,15 +1,17 @@
 # Swaps and payment channels
 
-Status: **consensus primitives, pool policy and wallet commands; no protocol software yet.** Since
+Status: **consensus primitives, pool policy, package relay, wallet commands and one-way payment
+channels in the wallet; no swap or two-way channel software yet.** Since
 node 0.15.0 the chain has 2-of-2 conditions, hash/time-locked contracts (HTLCs) and absolute and
 relative time locks ([CHAIN.md §4.1](CHAIN.md)); since node 0.16.0 also revocable outputs, revocable
 HTLCs and anyone-can-pay signatures ([§4.2](CHAIN.md)), and a pool that ranks packages (child pays for
 parent) and replaces by fee ([§4.3](CHAIN.md)). On the test network they are active from heights 1400
 and 4700, on the main network from genesis. `requant-wallet` describes conditions, locks coins under
-them and spends them along each path (`condition`, `spend-condition`, `cosign`). The protocols below
-are built in software on top of them, and **that software does not exist yet:** there is no swap tool,
-maker bot or channel implementation. The point of having the primitives now is that adding these
-protocols later needs no hard fork.
+them and spends them along each path (`condition`, `spend-condition`, `cosign`), and runs one-way
+payment channels (`channel`, wallet 0.7.0). The other protocols below are built in software on top of
+the same primitives, and **that software does not exist yet:** there is no swap tool, maker bot or
+two-way channel implementation. The point of having the primitives now is that adding these protocols
+later needs no hard fork.
 
 ## The primitives
 
@@ -93,6 +95,29 @@ Paying for traffic is one-way, client to server, and needs only 2-of-2 and an ab
 There is no revocation and no penalty: a newer state always pays the server more, so the server never
 wants to publish an older one. The consensus test `one_way_payment_channel` walks through exactly
 this.
+
+`requant-wallet channel` (0.7.0) implements it; the channel file is shared by both sides and holds no
+secret:
+
+```sh
+requant-wallet channel open client.wallet SERVER_PUBKEY SERVER_ADDRESS 5 EXPIRY --out ch.json  # client
+requant-wallet channel accept server.key ch.json          # server: checks it, signs the refund
+requant-wallet channel fund client.wallet ch.json         # client: only now sends the deposit
+requant-wallet channel pay client.wallet ch.json 0.25 --out s.hex   # client: total paid so far
+requant-wallet channel receive ch.json s.hex              # server: {"paid", "funded", "blocks_left", ...}
+requant-wallet channel close server.key ch.json s.hex     # server: before the expiry
+requant-wallet channel refund ch.json                     # client: from the expiry, if never closed
+```
+
+- The file carries the funding transfer without signatures. The txid does not cover them, so the
+  refund the server signs refers to the right deposit, but the server cannot send the deposit and hold
+  the client's coins before it has signed the refund. `fund` refuses to send a deposit whose refund
+  the server has not signed.
+- The server should count payments only once the deposit is confirmed (`receive` says so) and must
+  close well before the expiry: from the expiry the client's refund is valid too, and whichever
+  confirms first wins. `accept` refuses a channel shorter than `--min-blocks` (default 144).
+- The refund and every state pay a fixed fee of 1000 atoms; with package relay a child of either can
+  pay more.
 
 **Two-way channels** use the revocable templates of §4.2, as Lightning does. Each party holds its own
 version of the latest commitment transfer from the 2-of-2 deposit, in which its own balance pays a

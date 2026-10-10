@@ -30,6 +30,16 @@
 //!                            (PATH: both | claim | refund | owner | revoke; every coin under the condition)
 //! requant-wallet cosign      WALLET|KEYFILE PARTIAL.json      (second signature of a 2-of-2 spend)
 //!
+//! One-way payment channels (SWAPS.md §3; `channel.rs`): one deposit, many payments, two transactions.
+//! client: requant-wallet channel open WALLET|KEYFILE SERVER_PUBKEY SERVER_ADDRESS AMOUNT EXPIRY --out CH.json
+//! server: requant-wallet channel accept WALLET|KEYFILE CH.json [--min-blocks N]   (signs the refund)
+//! client: requant-wallet channel fund WALLET|KEYFILE CH.json                      (sends the deposit)
+//! client: requant-wallet channel pay WALLET|KEYFILE CH.json TOTAL --out STATE     (TOTAL paid so far, RQT)
+//! server: requant-wallet channel receive CH.json STATE                            (checks it; JSON)
+//! server: requant-wallet channel close WALLET|KEYFILE CH.json STATE              (before the expiry)
+//! client: requant-wallet channel refund CH.json                                   (from the expiry)
+//!         requant-wallet channel show CH.json
+//!
 //! Either: balance, history [N], coins of an ADDRESS, KEYFILE or WALLET; tx TXID;
 //! send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]...; consolidate WALLET|KEYFILE.
 //!
@@ -42,7 +52,7 @@
 
 use ed25519_dalek::SigningKey;
 use requant_consensus::params::Network;
-use requant_consensus::tx::{Hash, OutPoint, Tx};
+use requant_consensus::tx::{multi2_owner, Hash, OutPoint, Tx};
 use requant_node::rpc::{hex, unhex};
 use requant_wallet::backend::Backend;
 use requant_wallet::hd;
@@ -225,6 +235,52 @@ fn confirm(question: &str, yes: bool) {
     }
 }
 
+/// Every signing key of a wallet or key file.
+fn keys_of(net: &Network, src: &str, what: &str) -> Vec<SigningKey> {
+    match source(net, src) {
+        Source::Key(path) => vec![load_key(&path)],
+        Source::Wallet(path, w) => w.keyring(&unlock(&path, &w)).into_values().collect(),
+        Source::Address(_) => die(&format!("{what} takes a wallet or a key file")),
+    }
+}
+
+/// The key of `pubkey` among `keys`.
+fn key_for<'a>(keys: &'a [SigningKey], pubkey: &[u8; 32], who: &str) -> &'a SigningKey {
+    keys.iter()
+        .find(|k| k.verifying_key().to_bytes() == *pubkey)
+        .unwrap_or_else(|| die(&format!("this wallet does not hold the {who} key of the channel")))
+}
+
+fn read_channel(net: &Network, file: &str) -> channel::Channel {
+    let v = serde_json::from_str(&read(file)).unwrap_or_else(|e| die(&format!("{file}: {e}")));
+    channel::Channel::from_json(net, &v).unwrap_or_else(|e| die(&format!("{file}: {e}")))
+}
+
+fn write_channel(net: &Network, file: &str, c: &channel::Channel) {
+    write_file(file, &serde_json::to_string_pretty(&c.to_json(net)).unwrap());
+}
+
+fn read_tx(file: &str) -> Tx {
+    let bytes = unhex(read(file).trim()).unwrap_or_else(|_| die(&format!("{file}: not a transaction (hex)")));
+    Tx::decode_exact(&bytes).unwrap_or_else(|e| die(&format!("{file}: {e}")))
+}
+
+fn tip(rpc: &Backend) -> u64 {
+    let v = rpc.call("getinfo", json!([])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+    v["height"].as_u64().unwrap_or_else(|| die("rpc: getinfo gave no height"))
+}
+
+/// Where a channel's deposit stands on the chain: `(funded and unspent, confirmed, spent)`.
+fn channel_status(rpc: &Backend, c: &channel::Channel) -> (bool, bool, bool) {
+    let op = c.outpoint();
+    if let Some((_, _, confirmed)) = coins(rpc, &c.owner()).into_iter().find(|x| x.0.op == op) {
+        return (true, confirmed, false);
+    }
+    // not unspent: spent if the funding transfer is known, otherwise not sent yet
+    let known = rpc.call("gettx", json!([hex(&op.txid)])).is_ok();
+    (false, false, known)
+}
+
 fn send(rpc: &Backend, tx: &Tx) -> String {
     let txid = rpc.call("sendtx", json!([hex(&tx.encode())])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
     txid.as_str().unwrap_or("").to_string()
@@ -351,6 +407,8 @@ fn main() {
     let rpc_opt = opt("--rpc");
     let out = opt("--out");
     let preimage_opt = opt("--preimage");
+    let min_blocks =
+        opt("--min-blocks").map(|n| n.parse::<u64>().unwrap_or_else(|_| die("--min-blocks: a number of blocks")));
     let count = opt("--count").map(|c| match c.parse::<u32>() {
         Ok(n @ 1..=100_000) => n,
         _ => die("--count needs a number from 1 to 100000"),
@@ -748,6 +806,201 @@ fn main() {
                 }
             }
         }
+        // ---- payment channels ---------------------------------------------------------------------
+        ["channel", "open", src, server, server_to, amount, expiry] => {
+            let server: [u8; 32] = unhex(server)
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .unwrap_or_else(|| die("SERVER_PUBKEY: expected 64 hex digits (the server's `pubkey`)"));
+            let server_to = contracts::who(&net, server_to).unwrap_or_else(|e| die(&e));
+            let amount = parse_amount(amount).unwrap_or_else(|e| die(e));
+            let expiry: u64 = expiry.parse().unwrap_or_else(|_| die("EXPIRY: a block height"));
+            let Some(file) = &out else { die("channel open needs --out FILE (the channel file for both sides)") };
+            refuse_existing(file);
+            let addr = rpc();
+            let now = tip(&addr);
+            if expiry <= now + 20 {
+                die(&format!("the expiry must be well after the current height {now}"));
+            }
+            type Wallet = Option<(String, WalletFile)>;
+            let (key, keys, spendable, change, wallet): (SigningKey, HashMap<Hash, SigningKey>, Vec<Spendable>, Hash, Wallet) =
+                match source(&net, src) {
+                    Source::Key(path) => {
+                        let key = load_key(&path);
+                        let me = owner_of(&key);
+                        let spendable = coins(&addr, &me).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                        (key.clone(), HashMap::from([(me, key)]), spendable, me, None)
+                    }
+                    Source::Wallet(path, mut w) => {
+                        let seed = unlock(&path, &w);
+                        let keys = w.keyring(&seed);
+                        let current = w.receive[w.receive_issued.max(1) as usize - 1];
+                        let key = keys.get(&current).cloned().unwrap_or_else(|| die("the current address has no key here"));
+                        let spendable =
+                            all_coins(&addr, &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
+                        let change = next_change(&mut w, Some(&seed), &addr);
+                        (key, keys, spendable, change, Some((path, w)))
+                    }
+                    Source::Address(_) => die("channel open takes a wallet or a key file"),
+                };
+            let client = key.verifying_key().to_bytes();
+            let owner = multi2_owner(&client, &server);
+            let (mut tx, chosen, fee) =
+                plan_payment(&spendable, &[(owner, amount)], rate(), change).unwrap_or_else(|e| die(&e));
+            sign_with(&net, &mut tx, &chosen, &keys).unwrap_or_else(|e| die(&e));
+            let vout = tx.outputs().iter().position(|o| o.pkh == owner).unwrap() as u32;
+            let funding_owners = chosen.iter().map(|c| c.owner).collect();
+            let mut ch = channel::Channel::new(client, server, owner_of(&key), server_to, expiry, &tx, vout, funding_owners)
+                .unwrap_or_else(|e| die(&e));
+            ch.refund.sign(&net.chain_id, &[&key]);
+            if let Some((path, w)) = &wallet {
+                save(path, w);
+            }
+            write_channel(&net, file, &ch);
+            eprintln!(
+                "  deposit {} RQT to {} (funding fee {} RQT), refund to {} from height {expiry}",
+                format_amount(amount),
+                address(&net, &owner),
+                format_amount(fee),
+                address(&net, &ch.client_to)
+            );
+            eprintln!(
+                "channel written to {file}; nothing is sent yet. Give the file to the server: it runs `channel accept`, then run `channel fund`"
+            );
+        }
+        ["channel", "accept", src, file] => {
+            let mut ch = read_channel(&net, file);
+            let keys = keys_of(&net, src, "channel accept");
+            let key = key_for(&keys, &ch.server, "server");
+            if !keys.iter().any(|k| owner_of(k) == ch.server_to) {
+                die("the payments go to an address this wallet holds no key for");
+            }
+            let min_blocks = min_blocks.unwrap_or(144);
+            let now = tip(&rpc());
+            if ch.expiry < now + min_blocks {
+                die(&format!("the expiry {} is less than {min_blocks} blocks after the current height {now}", ch.expiry));
+            }
+            ch.refund.sign_second(&net.chain_id, 0, key);
+            if !ch.refund_accepted(&net) {
+                die("the refund does not verify");
+            }
+            let dest = out.clone().unwrap_or_else(|| file.to_string());
+            write_channel(&net, &dest, &ch);
+            eprintln!(
+                "  accepted: deposit {} RQT, expiry {} ({} blocks from now); refund signed, written to {dest}",
+                format_amount(ch.deposit),
+                ch.expiry,
+                ch.expiry - now
+            );
+        }
+        ["channel", "fund", src, file] => {
+            let ch = read_channel(&net, file);
+            if !ch.refund_accepted(&net) {
+                die("the server has not signed the refund yet: never fund a channel without it");
+            }
+            let ring: HashMap<Hash, SigningKey> =
+                keys_of(&net, src, "channel fund").into_iter().map(|k| (owner_of(&k), k)).collect();
+            let Tx::Transfer { inputs, .. } = &ch.funding else { die("bad funding transfer") };
+            let chosen: Vec<Spendable> = inputs
+                .iter()
+                .zip(&ch.funding_owners)
+                .map(|(i, o)| Spendable { op: i.prev, value: 0, owner: *o })
+                .collect();
+            let mut tx = ch.funding.clone();
+            sign_with(&net, &mut tx, &chosen, &ring).unwrap_or_else(|e| die(&e));
+            if tx.txid() != ch.funding.txid() {
+                die("the signed funding transfer differs from the channel's");
+            }
+            tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&e.to_string()));
+            confirm(&format!("send the deposit of {} RQT?", format_amount(ch.deposit)), yes);
+            println!("sent, txid {}", send(&rpc(), &tx));
+        }
+        ["channel", "pay", src, file, total] => {
+            let mut ch = read_channel(&net, file);
+            if !ch.refund_accepted(&net) {
+                die("the channel is not accepted by the server yet");
+            }
+            let total = parse_amount(total).unwrap_or_else(|e| die(e));
+            if total <= ch.paid {
+                die(&format!("TOTAL is what has been paid so far: more than {} RQT", format_amount(ch.paid)));
+            }
+            let keys = keys_of(&net, src, "channel pay");
+            let key = key_for(&keys, &ch.client, "client");
+            let mut state = ch.state(total).unwrap_or_else(|e| die(&e));
+            state.sign(&net.chain_id, &[key]);
+            let Some(path) = &out else { die("channel pay needs --out FILE (the state to give the server)") };
+            write_file(path, &hex(&state.encode()));
+            ch.paid = total;
+            write_channel(&net, file, &ch);
+            eprintln!(
+                "  state paying {} RQT in total ({} RQT left) written to {path}",
+                format_amount(total),
+                format_amount(ch.deposit - channel::CHANNEL_FEE - total)
+            );
+        }
+        ["channel", "receive", file, state] => {
+            let ch = read_channel(&net, file);
+            let st = read_tx(state);
+            let paid = ch.paid_by(&net, &st).unwrap_or_else(|e| die(&e));
+            let addr = rpc();
+            let (unspent, confirmed, spent) = channel_status(&addr, &ch);
+            let now = tip(&addr);
+            println!(
+                "{}",
+                json!({"paid": paid, "deposit": ch.deposit, "expiry": ch.expiry, "height": now,
+                       "blocks_left": ch.expiry.saturating_sub(now), "funded": unspent, "confirmed": confirmed,
+                       "closed": spent, "state_txid": hex(&st.txid())})
+            );
+        }
+        ["channel", "close", src, file, state] => {
+            let ch = read_channel(&net, file);
+            let mut st = read_tx(state);
+            let paid = ch.paid_by(&net, &st).unwrap_or_else(|e| die(&e));
+            let keys = keys_of(&net, src, "channel close");
+            st.sign_second(&net.chain_id, 0, key_for(&keys, &ch.server, "server"));
+            st.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&e.to_string()));
+            eprintln!("  close: {} RQT to {}", format_amount(paid), address(&net, &ch.server_to));
+            match &out {
+                Some(path) => {
+                    write_file(path, &hex(&st.encode()));
+                    eprintln!("signed state written to {path}; send it with `broadcast {path}` before height {}", ch.expiry);
+                }
+                None => {
+                    confirm("send?", yes);
+                    println!("sent, txid {}", send(&rpc(), &st));
+                }
+            }
+        }
+        ["channel", "refund", file] => {
+            let ch = read_channel(&net, file);
+            if !ch.refund_accepted(&net) {
+                die("the refund has no server signature");
+            }
+            let now = tip(&rpc());
+            if now + 1 < ch.expiry {
+                die(&format!("the refund is valid from height {}; the chain is at {now}", ch.expiry));
+            }
+            println!("sent, txid {}", send(&rpc(), &ch.refund));
+        }
+        ["channel", "show", file] => {
+            let ch = read_channel(&net, file);
+            let addr = rpc();
+            let (unspent, confirmed, spent) = channel_status(&addr, &ch);
+            let now = tip(&addr);
+            println!("deposit   {} RQT at {}", format_amount(ch.deposit), address(&net, &ch.owner()));
+            println!("client    {} (refund and change)", address(&net, &ch.client_to));
+            println!("server    {} (payments)", address(&net, &ch.server_to));
+            println!("expiry    height {} (now {now})", ch.expiry);
+            println!("paid      {} RQT (this file's record)", format_amount(ch.paid));
+            let status = match (ch.refund_accepted(&net), unspent, confirmed, spent) {
+                (false, ..) => "proposed: waiting for the server to sign the refund",
+                (true, true, false, _) => "funding sent, not confirmed yet",
+                (true, true, true, _) => "open",
+                (true, false, _, true) => "closed: the deposit was spent (the last state or the refund)",
+                (true, false, _, false) => "accepted: the deposit is not sent yet (`channel fund`)",
+            };
+            println!("status    {status}");
+        }
         // ---- single keys ------------------------------------------------------------------------
         ["keygen", path] => {
             refuse_existing(path);
@@ -959,6 +1212,9 @@ fn main() {
             "       | send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]... | consolidate WALLET|KEYFILE\n",
             "       | secret | pubkey SRC | condition KIND ARGS... [--out FILE]\n",
             "       | spend-condition SRC COND.json PATH ADDRESS [--preimage HEX] [--anyone-can-pay] | cosign SRC FILE\n",
+            "       | channel open SRC SERVER_PUBKEY SERVER_ADDRESS AMOUNT EXPIRY --out CH | channel accept SRC CH\n",
+            "       | channel fund SRC CH | channel pay SRC CH TOTAL --out STATE | channel receive CH STATE\n",
+            "       | channel close SRC CH STATE | channel refund CH | channel show CH\n",
             "options: --network test|regtest (default test, or the wallet's) --rpc HOST:PORT\n",
             "         --fee-rate ATOMS_PER_BYTE|fast|normal|slow (default normal: the node's estimate) --yes --out FILE"
         )),

@@ -288,3 +288,85 @@ fn conditions_from_the_wallet_htlc_and_two_of_two() {
     assert!(sent.starts_with("sent"), "{sent}");
     wait("the 2-of-2 spend to confirm", || cli.confirmed(&outside) > 199_000_000);
 }
+
+#[test]
+fn a_payment_channel_closed_by_the_server_and_one_refunded() {
+    let net = Network::regtest();
+    let _one = serial();
+    let d = dir("channel");
+    let mut cli = Cli { dir: d.clone(), rpc: "127.0.0.1:1".into(), api: None };
+    let field = |out: &str, name: &str| -> String {
+        out.lines().find(|l| l.starts_with(name)).unwrap().split_whitespace().nth(1).unwrap().to_string()
+    };
+    // the client mines; the server has a key file
+    let a = cli.ok(&["create", "a.json", "--no-passphrase"]);
+    let client = field(&a, "address");
+    let s = cli.ok(&["keygen", "srv.key", "--no-passphrase"]);
+    let server = field(&s, "address");
+    let server_pub = field(&cli.ok(&["pubkey", "srv.key"]), "pubkey");
+    let explorer = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let h = node(&d.join("node"), parse_address(&net, &client).unwrap(), explorer);
+    cli.rpc = h.rpc.unwrap().to_string();
+    wait("mined coins to mature", || cli.confirmed("a.json") > 1_200_000_000);
+    let height = || h.shared.lock().unwrap().chain.height();
+    let channel = |file: &str| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(d.join(file)).unwrap()).unwrap()
+    };
+
+    // open: nothing is sent, and the deposit cannot be sent before the server signs the refund
+    let expiry = (height() + 400).to_string();
+    cli.ok(&["channel", "open", "a.json", &server_pub, &server, "5", &expiry, "--out", "ch.json"]);
+    let deposit_at = channel("ch.json")["address"].as_str().unwrap().to_string();
+    let (ok, _, err) = cli.run_env(&["channel", "fund", "a.json", "ch.json", "--yes"], &[]);
+    assert!(!ok && err.contains("never fund"), "{err}");
+    let (ok, _, err) = cli.run_env(&["channel", "pay", "a.json", "ch.json", "1", "--out", "s.hex"], &[]);
+    assert!(!ok && err.contains("not accepted"), "{err}");
+    // the server signs the refund (it insists on a long enough channel), then the client funds it
+    let (ok, _, err) = cli.run_env(&["channel", "accept", "srv.key", "ch.json", "--min-blocks", "100000"], &[]);
+    assert!(!ok && err.contains("blocks after"), "{err}");
+    let (ok, _, err) = cli.run_env(&["channel", "accept", "a.json", "ch.json"], &[]);
+    assert!(!ok && err.contains("server key"), "{err}");
+    cli.ok(&["channel", "accept", "srv.key", "ch.json", "--min-blocks", "50"]);
+    assert_eq!(channel("ch.json")["accepted"], true);
+    assert!(cli.ok(&["channel", "fund", "a.json", "ch.json", "--yes"]).starts_with("sent"));
+    wait("the deposit to confirm", || cli.confirmed(&deposit_at) == 500_000_000);
+    assert!(cli.ok(&["channel", "show", "ch.json"]).contains("status    open"));
+
+    // payments: each state pays the server more; a smaller total is refused
+    cli.ok(&["channel", "pay", "a.json", "ch.json", "0.5", "--out", "s1.hex"]);
+    cli.ok(&["channel", "pay", "a.json", "ch.json", "1.25", "--out", "s2.hex"]);
+    let (ok, _, err) = cli.run_env(&["channel", "pay", "a.json", "ch.json", "1", "--out", "s3.hex"], &[]);
+    assert!(!ok && err.contains("more than 1.25"), "{err}");
+    assert_eq!(channel("ch.json")["paid"], 125_000_000);
+    let r: serde_json::Value = serde_json::from_str(&cli.ok(&["channel", "receive", "ch.json", "s2.hex"])).unwrap();
+    assert_eq!(
+        (r["paid"].as_u64(), r["funded"].as_bool(), r["confirmed"].as_bool()),
+        (Some(125_000_000), Some(true), Some(true))
+    );
+    assert!(r["blocks_left"].as_u64().unwrap() > 50);
+    // a state is not a payment until the server signs it: the client cannot send one alone
+    let (ok, _, _) = cli.run_env(&["broadcast", "s2.hex"], &[]);
+    assert!(!ok);
+    // the server closes with the last state
+    assert!(cli.ok(&["channel", "close", "srv.key", "ch.json", "s2.hex", "--yes"]).starts_with("sent"));
+    wait("the close to confirm", || cli.confirmed(&server) == 125_000_000);
+    wait("the deposit to be spent", || cli.ok(&["channel", "show", "ch.json"]).contains("status    closed"));
+
+    // a second channel the server never closes: the client takes the refund at the expiry
+    let expiry = height() + 80;
+    let e = expiry.to_string();
+    cli.ok(&["channel", "open", "a.json", &server_pub, &server, "2", &e, "--out", "ch2.json"]);
+    cli.ok(&["channel", "accept", "srv.key", "ch2.json", "--min-blocks", "50"]);
+    cli.ok(&["channel", "fund", "a.json", "ch2.json", "--yes"]);
+    let deposit2 = channel("ch2.json")["address"].as_str().unwrap().to_string();
+    wait("the second deposit to confirm", || cli.confirmed(&deposit2) == 200_000_000);
+    let (ok, _, err) = cli.run_env(&["channel", "refund", "ch2.json"], &[]);
+    assert!(!ok && err.contains("valid from height"), "{err}");
+    wait("the expiry", || height() + 1 >= expiry);
+    assert!(cli.ok(&["channel", "refund", "ch2.json"]).starts_with("sent"));
+    wait("the refund to confirm", || cli.confirmed(&deposit2) == 0);
+    assert!(cli.ok(&["channel", "show", "ch2.json"]).contains("status    closed"));
+    h.shutdown();
+    drop(h);
+    let _ = std::fs::remove_dir_all(&d);
+}
