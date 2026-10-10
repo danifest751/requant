@@ -76,6 +76,11 @@ fn sync_relay_mine_and_restart() {
     wait("b to sync", 60, || height(&b) >= 5 && height(&b) + 1 >= height(&a));
     let target = height(&a) + 3;
     wait("b to follow", 60, || height(&b) >= target);
+    // the miner's view of b's height follows too (b fetches every new block from a and never announces it back)
+    wait("a to see b's height", 60, || {
+        let h = height(&a);
+        a.shared.lock().unwrap().peers().iter().any(|p| p.height + 2 >= h && p.height > 5)
+    });
 
     // alice pays bob through b's RPC; the transaction reaches a's pool and a mines it
     let rpc_b = b.rpc.unwrap();

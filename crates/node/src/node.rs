@@ -772,6 +772,7 @@ impl State {
                 // each id once, and at most MAX_GETDATA_BYTES per request (a peer asks again for the rest)
                 let mut seen = HashSet::new();
                 let mut sent = 0usize;
+                let mut served = 0u64;
                 for id in ids {
                     if sent >= MAX_GETDATA_BYTES || !seen.insert(id) {
                         continue;
@@ -781,6 +782,7 @@ impl State {
                         if self.upload_capped() && b.header.height + 100 < self.chain.height() {
                             continue;
                         }
+                        served = served.max(b.header.height);
                         let bytes = b.encode();
                         sent += bytes.len();
                         self.send(peer, Msg::Block(bytes));
@@ -789,6 +791,12 @@ impl State {
                         sent += bytes.len();
                         self.send(peer, Msg::Tx(bytes));
                     }
+                }
+                // a peer fetching our blocks is about to have them. Blocks found by this node reach every peer
+                // from here, and peers never announce a block back to where it came from, so without this the
+                // peer heights this node shows would stay at their values from the handshake.
+                if let Some(p) = self.peers.get_mut(&peer) {
+                    p.height = p.height.max(served);
                 }
             }
             Msg::Block(bytes) => {
