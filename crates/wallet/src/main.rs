@@ -20,6 +20,15 @@
 //! requant-wallet address     KEYFILE|WALLET
 //! requant-wallet encrypt     KEYFILE|WALLET                   (encrypt, or change the passphrase)
 //!
+//! Spending conditions (CHAIN.md §4.1–4.2): lock coins with an ordinary `send` to a condition's address.
+//! requant-wallet secret                                      (a random 32-byte secret and its SHA-256)
+//! requant-wallet pubkey      WALLET|KEYFILE                  (public key of the current address, for 2-of-2)
+//! requant-wallet condition   multi2 PUB_A PUB_B | htlc HASH CLAIM REFUND TIMEOUT | delayed OWNER REVOKE DELAY
+//!                            | htlc-revocable HASH CLAIM REFUND REVOKE TIMEOUT CLAIM_DELAY REFUND_DELAY [--out FILE]
+//! requant-wallet spend-condition WALLET|KEYFILE COND.json PATH ADDRESS [--preimage HEX] [--anyone-can-pay]
+//!                            (PATH: both | claim | refund | owner | revoke; every coin under the condition)
+//! requant-wallet cosign      WALLET|KEYFILE PARTIAL.json      (second signature of a 2-of-2 spend)
+//!
 //! Either: balance, history [N], coins of an ADDRESS, KEYFILE or WALLET; tx TXID;
 //! send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]...; consolidate WALLET|KEYFILE.
 //!
@@ -329,6 +338,7 @@ fn main() {
     let plain = flag("--no-passphrase");
     let yes = flag("--yes");
     let no_scan = flag("--no-scan");
+    let anyone_can_pay = flag("--anyone-can-pay");
     let mut opt = |name: &str| -> Option<String> {
         let k = args.iter().position(|a| a == name)?;
         let v = args.get(k + 1).cloned().unwrap_or_else(|| die(&format!("{name} needs a value")));
@@ -339,6 +349,7 @@ fn main() {
     let api = opt("--api");
     let rpc_opt = opt("--rpc");
     let out = opt("--out");
+    let preimage_opt = opt("--preimage");
     let count = opt("--count").map(|c| match c.parse::<u32>() {
         Ok(n @ 1..=100_000) => n,
         _ => die("--count needs a number from 1 to 100000"),
@@ -592,6 +603,134 @@ fn main() {
             tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&format!("{file}: {e}")));
             println!("sent, txid {}", send(&rpc(), &tx));
         }
+        // ---- spending conditions ----------------------------------------------------------------
+        ["secret"] => {
+            let secret = Zeroizing::new(random::<32>());
+            println!("secret  {}", hex(secret.as_ref()));
+            println!("sha256  {}", hex(&contracts::sha256(secret.as_ref())));
+            eprintln!("keep the secret private until you claim; give out only the sha256");
+        }
+        ["pubkey", src] => {
+            let key = match source(&net, src) {
+                Source::Key(path) => load_key(&path),
+                Source::Wallet(path, w) => {
+                    let seed = unlock(&path, &w);
+                    let current = w.receive[w.receive_issued.max(1) as usize - 1];
+                    w.keyring(&seed).remove(&current).unwrap_or_else(|| die("the current address has no key here"))
+                }
+                Source::Address(_) => die("pubkey takes a wallet or a key file"),
+            };
+            println!("address {}", address(&net, &owner_of(&key)));
+            println!("pubkey  {}", hex(&key.verifying_key().to_bytes()));
+        }
+        ["condition", rest @ ..] => {
+            let cond = contracts::Condition::from_words(&net, rest).unwrap_or_else(|e| die(&e));
+            eprintln!("address {}  (send coins here to lock them)", address(&net, &cond.owner()));
+            write_out(&serde_json::to_string_pretty(&cond.to_json(&net)).unwrap(), "condition");
+        }
+        ["spend-condition", src, file, how, to] => {
+            let cond = contracts::Condition::from_json(&net, &serde_json::from_str(&read(file)).unwrap_or_else(|e| die(&format!("{file}: {e}"))))
+                .unwrap_or_else(|e| die(&format!("{file}: {e}")));
+            let to = contracts::who(&net, to).unwrap_or_else(|e| die(&e));
+            let preimage = preimage_opt.as_ref().map(|p| {
+                unhex(p).ok().and_then(|b| b.try_into().ok()).unwrap_or_else(|| die("--preimage: expected 64 hex digits"))
+            });
+            // confirmed coins only: relative locks count from a coin's block
+            let held: Vec<(OutPoint, u64)> = coins(&rpc(), &cond.owner())
+                .into_iter()
+                .filter(|c| c.2)
+                .map(|c| (c.0.op, c.0.value))
+                .collect();
+            let (mut tx, fee) = contracts::spend(&cond, how, &held, &to, rate(), preimage, anyone_can_pay)
+                .unwrap_or_else(|e| die(&e));
+            let signers = cond.signers(how).unwrap_or_else(|e| die(&e));
+            let keys: Vec<SigningKey> = match source(&net, src) {
+                Source::Key(path) => vec![load_key(&path)],
+                Source::Wallet(path, w) => w.keyring(&unlock(&path, &w)).into_values().collect(),
+                Source::Address(_) => die("spend-condition takes a wallet or a key file"),
+            };
+            let first = keys
+                .iter()
+                .find(|k| contracts::role(&signers, &k.verifying_key().to_bytes()).0)
+                .unwrap_or_else(|| die("this wallet holds no key that signs this path"));
+            let n = held.len();
+            tx.sign(&net.chain_id, &vec![first; n]);
+            eprintln!(
+                "  spend {n} coin(s) of {} along {how}: {} RQT to {}, fee {} RQT",
+                address(&net, &cond.owner()),
+                format_amount(tx.outputs()[0].value),
+                address(&net, &to),
+                format_amount(fee)
+            );
+            if let contracts::Signers::Both(_, second) = signers {
+                match keys.iter().find(|k| k.verifying_key().to_bytes() == second) {
+                    Some(k) => (0..n).for_each(|i| tx.sign_second(&net.chain_id, i, k)),
+                    None => {
+                        let partial = json!({"requant_partial": 1, "network": net.name, "tx": hex(&tx.encode()),
+                                             "second": hex(&second)});
+                        let Some(path) = &out else { die("the other key signs next: pass --out FILE and send it the file") };
+                        write_file(path, &serde_json::to_string_pretty(&partial).unwrap());
+                        eprintln!("partly signed; the holder of the second key runs `cosign WALLET {path}`");
+                        return;
+                    }
+                }
+            }
+            tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&e.to_string()));
+            match &out {
+                Some(path) => {
+                    write_file(path, &hex(&tx.encode()));
+                    eprintln!("signed transfer written to {path}; send it with `broadcast {path}`");
+                }
+                None => {
+                    confirm("send?", yes);
+                    println!("sent, txid {}", send(&rpc(), &tx));
+                }
+            }
+        }
+        ["cosign", src, file] => {
+            let v: serde_json::Value = serde_json::from_str(&read(file)).unwrap_or_else(|e| die(&format!("{file}: {e}")));
+            if v["requant_partial"] != json!(1) || v["network"] != json!(net.name) {
+                die(&format!("{file}: not a partly signed transfer of this network"));
+            }
+            let mut tx = v["tx"]
+                .as_str()
+                .and_then(|h| unhex(h).ok())
+                .and_then(|b| Tx::decode_exact(&b).ok())
+                .unwrap_or_else(|| die(&format!("{file}: bad transaction")));
+            let second: [u8; 32] = v["second"]
+                .as_str()
+                .and_then(|h| unhex(h).ok())
+                .and_then(|b| b.try_into().ok())
+                .unwrap_or_else(|| die(&format!("{file}: bad second key")));
+            let keys: Vec<SigningKey> = match source(&net, src) {
+                Source::Key(path) => vec![load_key(&path)],
+                Source::Wallet(path, w) => w.keyring(&unlock(&path, &w)).into_values().collect(),
+                Source::Address(_) => die("cosign takes a wallet or a key file"),
+            };
+            let key = keys
+                .iter()
+                .find(|k| k.verifying_key().to_bytes() == second)
+                .unwrap_or_else(|| die("this wallet does not hold the second key"));
+            let n = match &tx {
+                Tx::Transfer { inputs, .. } => inputs.len(),
+                Tx::Coinbase { .. } => 0,
+            };
+            for i in 0..n {
+                tx.sign_second(&net.chain_id, i, key);
+            }
+            tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&e.to_string()));
+            eprintln!("  {} RQT to {}", format_amount(tx.outputs()[0].value), address(&net, &tx.outputs()[0].pkh));
+            match &out {
+                Some(path) => {
+                    write_file(path, &hex(&tx.encode()));
+                    eprintln!("signed transfer written to {path}; send it with `broadcast {path}`");
+                }
+                None => {
+                    confirm("send?", yes);
+                    println!("sent, txid {}", send(&rpc(), &tx));
+                }
+            }
+        }
         // ---- single keys ------------------------------------------------------------------------
         ["keygen", path] => {
             refuse_existing(path);
@@ -801,6 +940,8 @@ fn main() {
             "       | broadcast FILE | keygen KEYFILE [--no-passphrase] | encrypt KEYFILE|WALLET | address KEYFILE|WALLET\n",
             "       | balance SRC | history SRC [N] | coins SRC | tx TXID   (SRC: an address, a key file or a wallet)\n",
             "       | send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]... | consolidate WALLET|KEYFILE\n",
+            "       | secret | pubkey SRC | condition KIND ARGS... [--out FILE]\n",
+            "       | spend-condition SRC COND.json PATH ADDRESS [--preimage HEX] [--anyone-can-pay] | cosign SRC FILE\n",
             "options: --network test|regtest (default test, or the wallet's) --rpc HOST:PORT\n",
             "         --fee-rate ATOMS_PER_BYTE|fast|normal|slow (default normal: the node's estimate) --yes --out FILE"
         )),

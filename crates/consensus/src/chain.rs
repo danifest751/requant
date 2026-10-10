@@ -108,6 +108,9 @@ pub fn check_activation(net: &Network, tx: &Tx, height: u64) -> Result<(), Error
     if tx.is_v2() && height < net.conditions_height {
         return Err(Error::Invalid("conditions and time locks are not active at this height"));
     }
+    if tx.uses_contracts() && height < net.contracts_height {
+        return Err(Error::Invalid("revocable outputs and anyone-can-pay are not active at this height"));
+    }
     Ok(())
 }
 

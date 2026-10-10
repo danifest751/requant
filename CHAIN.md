@@ -28,6 +28,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 | coinbase maturity | 100 | 100 | 2 |
 | development fund (§8) | 6%, heights 1..2^21, key set at launch | same, `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` | 6%, heights 1..8, public test key |
 | conditions and time locks (§4.1) from height | 0 (genesis) | 1400 | 0 |
+| revocable outputs, revocable HTLCs, anyone-can-pay (§4.2) from height | 0 (genesis) | 4700 | 0 |
 
 `chain_id = H("requant/chain", name)`. Regtest exists for tests and local development; its small work
 function makes CPU mining instant. The main network's genesis target is chosen at launch from the
@@ -101,6 +102,50 @@ htlc     = hash[32] || claim_pkh[32] || refund_pkh[32] || LE64 timeout
 - Kind-2 transfers are valid from the network's activation height (table in §2); before it, a block
   containing one is invalid. Fixed templates only: there is no script language. Swap and channel
   protocols built from these are software ([SWAPS.md](SWAPS.md)).
+
+### 4.2 Revocable outputs, revocable HTLCs and anyone-can-pay
+
+Two more templates make two-way payment channels with a penalty possible (a party that publishes a
+revoked state loses the channel), and a signature flag lets others add inputs to a signed transfer:
+
+```
+delayed owner   = H("requant/delayed", owner_pkh[32] || revoke_pkh[32] || LE32 delay)
+revocable owner = H("requant/htlc-revocable", hash[32] || claim_pkh || refund_pkh || revoke_pkh
+                    || LE64 timeout || LE32 claim_delay || LE32 refund_delay)
+
+unlock 4 delayed owner:     delayed[68]                  pkh(pubkey) = owner_pkh, after_blocks >= delay
+unlock 5 delayed revoke:    delayed[68]                  pkh(pubkey) = revoke_pkh
+unlock 6 revocable claim:   revocable[144] || preimage[32]   pkh = claim_pkh, SHA256(preimage) = hash,
+                                                         after_blocks >= claim_delay
+unlock 7 revocable refund:  revocable[144]               pkh = refund_pkh, after_height >= timeout,
+                                                         after_blocks >= refund_delay
+unlock 8 revocable revoke:  revocable[144]               pkh = revoke_pkh
+delayed   = owner_pkh[32] || revoke_pkh[32] || LE32 delay
+revocable = hash[32] || claim_pkh[32] || refund_pkh[32] || revoke_pkh[32] || LE64 timeout
+            || LE32 claim_delay || LE32 refund_delay
+```
+
+- **Anyone-can-pay** is the top bit (`0x80`) of an input's unlock byte; the encodings of §4.1 are
+  unchanged. Such an input (and, for a 2-of-2, both its keys) signs
+  `H("requant/sighash-acp", chain_id || LE32 version || prev_txid || LE32 vout || pubkey || the input's
+  kind-2 fields without signature2 || outputs)` instead of the sighash of §4: the input and every
+  output, but no other input. Others may then add inputs (to raise the fee, or to fund a shared
+  payment) without the signer; changing an output invalidates the signature. Adding inputs changes the
+  txid, so transfers pre-signed on top of an anyone-can-pay one do not survive it.
+- Before the network's activation height (table in §2) a block with an unlock of kind 4–8 or the
+  anyone-can-pay flag is invalid.
+
+### 4.3 Pool policy (not consensus)
+
+- Blocks take transactions by the fee rate of the package they complete: a transaction with its
+  unconfirmed ancestors. A child paying well pulls in a cheap parent (child pays for parent); every
+  transaction must still pay the minimum relay rate (1 atom per byte) on its own.
+- A full pool drops the transactions with the lowest rate, each judged by the better of its own rate
+  and its rate with its descendants, so a well-paying child keeps its parent.
+- Replace by fee: a transaction spending an output a pooled one spends replaces it and its
+  descendants (at most 100) when it pays more than all of them together plus its own size at the
+  minimum rate, and a higher rate than each one it conflicts with directly. It may not spend what it
+  replaces.
 
 ## 5. Blocks
 

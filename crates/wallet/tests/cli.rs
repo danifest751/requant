@@ -221,3 +221,58 @@ fn wallet_end_to_end() {
     drop(h);
     let _ = std::fs::remove_dir_all(&d);
 }
+
+#[test]
+fn conditions_from_the_wallet_htlc_and_two_of_two() {
+    let net = Network::regtest();
+    let d = dir();
+    let mut cli = Cli { dir: d.clone(), rpc: "127.0.0.1:1".into(), api: None };
+    let field = |out: &str, name: &str| -> String {
+        out.lines().find(|l| l.starts_with(name)).unwrap().split_whitespace().nth(1).unwrap().to_string()
+    };
+    // Alice mines; Bob only receives
+    let a = cli.ok(&["create", "a.json", "--no-passphrase"]);
+    let alice = a.lines().find(|l| l.starts_with("address")).unwrap().split_whitespace().nth(1).unwrap().to_string();
+    let b = cli.ok(&["create", "b.json", "--no-passphrase"]);
+    let bob = b.lines().find(|l| l.starts_with("address")).unwrap().split_whitespace().nth(1).unwrap().to_string();
+    let explorer = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap();
+    let h = node(&d.join("node"), parse_address(&net, &alice).unwrap(), explorer);
+    cli.rpc = h.rpc.unwrap().to_string();
+    wait("mined coins to mature", || cli.confirmed("a.json") > 300_000_000);
+
+    // HTLC: Alice locks 1 RQT that Bob claims with the secret
+    let s = cli.ok(&["secret"]);
+    let (secret, hash) = (field(&s, "secret"), field(&s, "sha256"));
+    cli.ok(&["condition", "htlc", &hash, &bob, &alice, "100000", "--out", "htlc.json"]);
+    let cond: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.join("htlc.json")).unwrap()).unwrap();
+    let locked = cond["address"].as_str().unwrap().to_string();
+    assert!(cli.ok(&["send", "a.json", &locked, "1", "--yes"]).starts_with("sent"));
+    wait("the HTLC coin to confirm", || cli.confirmed(&locked) == 100_000_000);
+    // without the secret, or with Alice's wallet, nothing is spent
+    assert!(!cli.run_env(&["spend-condition", "b.json", "htlc.json", "claim", &bob, "--yes"], &[]).0);
+    let (ok, _, err) =
+        cli.run_env(&["spend-condition", "a.json", "htlc.json", "claim", &alice, "--preimage", &secret, "--yes"], &[]);
+    assert!(!ok && err.contains("no key"), "{err}");
+    let claim = cli.ok(&["spend-condition", "b.json", "htlc.json", "claim", &bob, "--preimage", &secret, "--yes"]);
+    assert!(claim.starts_with("sent"), "{claim}");
+    wait("Bob's claim to confirm", || cli.confirmed("b.json") > 99_000_000);
+    assert_eq!(cli.confirmed(&locked), 0);
+
+    // 2-of-2: Alice signs first, Bob co-signs from the partly signed file
+    let pa = field(&cli.ok(&["pubkey", "a.json"]), "pubkey");
+    let pb = field(&cli.ok(&["pubkey", "b.json"]), "pubkey");
+    cli.ok(&["condition", "multi2", &pa, &pb, "--out", "m2.json"]);
+    let cond: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(d.join("m2.json")).unwrap()).unwrap();
+    let joint = cond["address"].as_str().unwrap().to_string();
+    assert!(cli.ok(&["send", "a.json", &joint, "2", "--yes"]).starts_with("sent"));
+    wait("the 2-of-2 coin to confirm", || cli.confirmed(&joint) == 200_000_000);
+    let outside = address(&net, &[0x55; 32]);
+    let (ok, _, err) = cli.run_env(&["spend-condition", "a.json", "m2.json", "both", &outside, "--yes"], &[]);
+    assert!(!ok && err.contains("--out"), "{err}");
+    cli.ok(&["spend-condition", "a.json", "m2.json", "both", &outside, "--out", "part.json"]);
+    let (ok, _, err) = cli.run_env(&["cosign", "a.json", "part.json", "--yes"], &[]);
+    assert!(!ok && err.contains("second key"), "{err}");
+    let sent = cli.ok(&["cosign", "b.json", "part.json", "--yes"]);
+    assert!(sent.starts_with("sent"), "{sent}");
+    wait("the 2-of-2 spend to confirm", || cli.confirmed(&outside) > 199_000_000);
+}

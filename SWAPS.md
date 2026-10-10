@@ -1,11 +1,15 @@
 # Swaps and payment channels
 
-Status: **consensus primitives only.** Since node 0.15.0 the chain has 2-of-2 conditions, hash/time-
-locked contracts (HTLCs) and absolute and relative time locks ([CHAIN.md §4.1](CHAIN.md)). They are
-active on the test network from height 1400 and on the main network from genesis. The protocols
-below are built in software on top of them. **None of that software exists yet:** there is no swap
-tool, maker bot or channel implementation. The point of having the primitives now is that adding
-these protocols later needs no hard fork.
+Status: **consensus primitives, pool policy and wallet commands; no protocol software yet.** Since
+node 0.15.0 the chain has 2-of-2 conditions, hash/time-locked contracts (HTLCs) and absolute and
+relative time locks ([CHAIN.md §4.1](CHAIN.md)); since node 0.16.0 also revocable outputs, revocable
+HTLCs and anyone-can-pay signatures ([§4.2](CHAIN.md)), and a pool that ranks packages (child pays for
+parent) and replaces by fee ([§4.3](CHAIN.md)). On the test network they are active from heights 1400
+and 4700, on the main network from genesis. `requant-wallet` describes conditions, locks coins under
+them and spends them along each path (`condition`, `spend-condition`, `cosign`). The protocols below
+are built in software on top of them, and **that software does not exist yet:** there is no swap tool,
+maker bot or channel implementation. The point of having the primitives now is that adding these
+protocols later needs no hard fork.
 
 ## The primitives
 
@@ -14,6 +18,10 @@ these protocols later needs no hard fork.
 | Hash lock | HTLC claim path: the 32-byte SHA-256 preimage and the claim key |
 | Time lock | HTLC refund path (absolute height); `after_height` and `after_blocks` on any input |
 | 2-of-2 | Multi2 condition: two ed25519 keys sign the same transaction |
+| Revocable output | `delayed`: the owner after a relative delay, the revocation key at any time |
+| Revocable HTLC | as an HTLC, with delays on claim and refund and a revocation path |
+| Anyone-can-pay | a signature over its own input and all outputs, so others may add inputs |
+| k-of-n | off chain: FROST or MuSig2 aggregate ed25519 keys into one ordinary key |
 
 A locked coin pays a hash like any address, so locking is an ordinary transfer. The spending input
 reveals the condition. Txids exclude signatures, so a transfer can be signed by both parties before
@@ -84,8 +92,17 @@ Paying for traffic is one-way, client to server, and needs only 2-of-2 and an ab
 
 There is no revocation and no penalty: a newer state always pays the server more, so the server never
 wants to publish an older one. The consensus test `one_way_payment_channel` walks through exactly
-this. Two-way channels (Lightning-style) would also need revocation keys. The same primitives
-suffice, but the software is far larger.
+this.
+
+**Two-way channels** use the revocable templates of §4.2, as Lightning does. Each party holds its own
+version of the latest commitment transfer from the 2-of-2 deposit, in which its own balance pays a
+revocable output (`delayed`: itself after `delay` blocks, or the other party's revocation key at once)
+and the other party's balance pays the other party directly. Moving to a new state, each side hands
+over the secret of its revocation key for the old one. Publishing a revoked state then lets the other
+side take the publisher's balance through the revocation path before the delay ends. Payments routed
+through channels sit in revocable HTLCs (claim with the preimage, refund after the timeout, both after
+a delay; revocation at once). The templates are in consensus; the channel software is large and
+needs review.
 
 ## Before any of this carries real value
 
@@ -95,9 +112,11 @@ suffice, but the software is far larger.
   the amount and the network's hashrate, and say so to users. TNet hashrate cannot be rented on the
   usual GPU markets, which helps but does not remove this risk.
 - **Fees on pre-signed transfers.** Refunds and cancels are signed long before they are sent. If fees
-  rise in between, they may not get in. The node's pool does not yet rank a parent and child
-  together (child-pays-for-parent). That policy, or a dedicated fee output in these transfers, must
-  exist before swaps or channels go live. It is node policy, not consensus.
+  rise in between, there are three ways to get them in (node 0.16.0): a child spending one of their
+  outputs pays for both (packages are ranked together); a signer who used anyone-can-pay lets anyone
+  add an input that raises the fee; and a single-signer transfer can be replaced by fee. Every
+  pre-signed transfer must still pay the minimum relay rate on its own, because nodes do not yet relay
+  packages with a parent below it.
 - **Review.** The consensus rules are small, fixed templates with tests
   (`crates/consensus/tests/conditions.rs`). The protocols need their own review, the Monero one most
   of all.

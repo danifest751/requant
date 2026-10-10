@@ -125,3 +125,76 @@ fn time_locked_transactions_wait_outside_the_pool() {
     assert_eq!(pool.add(rel, &chain), not_yet);
     assert_eq!(pool.len(), 1);
 }
+
+#[test]
+fn blocks_take_the_best_package_child_pays_for_parent() {
+    let (chain, coins) = funded(3);
+    let value = |op: &OutPoint| chain.coin(op).unwrap().output.value;
+    let size = spend(&chain, coins[0], value(&coins[0]), 1000).encode().len();
+    let mut pool = Mempool::default();
+    // a cheap parent (minimum fee) and a child paying a lot for both
+    let parent = spend(&chain, coins[0], value(&coins[0]), size as u64);
+    let parent_id = pool.add(parent.clone(), &chain).unwrap();
+    let child = spend(&chain, OutPoint { txid: parent_id, vout: 0 }, parent.outputs()[0].value, 40 * size as u64);
+    let child_id = pool.add(child, &chain).unwrap();
+    // an unrelated transaction paying more than the parent alone, less than parent with child
+    let middle = spend(&chain, coins[1], value(&coins[1]), 10 * size as u64);
+    let middle_id = pool.add(middle, &chain).unwrap();
+    // room for two: the parent-and-child package wins over the middle one
+    let (txs, fees) = pool.select(2 * size + 10);
+    let ids: Vec<_> = txs.iter().map(|t| t.txid()).collect();
+    assert_eq!(ids, vec![parent_id, child_id], "parent first, then child");
+    assert_eq!(fees, 41 * size as u64);
+    // with room for all three, everything goes, parents before children
+    let (txs, _) = pool.select(10 * size);
+    let ids: Vec<_> = txs.iter().map(|t| t.txid()).collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.iter().position(|i| *i == parent_id) < ids.iter().position(|i| *i == child_id));
+    assert!(ids.contains(&middle_id));
+}
+
+#[test]
+fn replace_by_fee_rules() {
+    let (chain, coins) = funded(2);
+    let value = |op: &OutPoint| chain.coin(op).unwrap().output.value;
+    let size = spend(&chain, coins[0], value(&coins[0]), 1000).encode().len() as u64;
+    let mut pool = Mempool::default();
+    let first = spend(&chain, coins[0], value(&coins[0]), 2 * size);
+    let first_id = pool.add(first.clone(), &chain).unwrap();
+    let child = spend(&chain, OutPoint { txid: first_id, vout: 0 }, first.outputs()[0].value, 2 * size);
+    let child_id = pool.add(child, &chain).unwrap();
+    // the same coin with too little extra: must cover what it evicts (4 * size) plus its own size
+    let weak = spend(&chain, coins[0], value(&coins[0]), 4 * size);
+    assert_eq!(
+        pool.add(weak, &chain),
+        Err(Error::Invalid("replacement must pay more than what it replaces, plus its own size"))
+    );
+    // enough: replaces the first and its child
+    let strong = spend(&chain, coins[0], value(&coins[0]), 5 * size);
+    let strong_id = pool.add(strong, &chain).unwrap();
+    assert!(pool.contains(&strong_id) && !pool.contains(&first_id) && !pool.contains(&child_id));
+    assert_eq!(pool.len(), 1);
+    // a later replacement must again pay more, and at a higher rate
+    let same = spend(&chain, coins[0], value(&coins[0]), 5 * size);
+    assert!(pool.add(same, &chain).is_err());
+}
+
+#[test]
+fn a_well_paying_child_protects_its_parent_from_eviction() {
+    let (chain, coins) = funded(4);
+    let value = |op: &OutPoint| chain.coin(op).unwrap().output.value;
+    let size = spend(&chain, coins[0], value(&coins[0]), 1000).encode().len();
+    let mut pool = Mempool::with_limit(3 * size + 10);
+    let parent = spend(&chain, coins[0], value(&coins[0]), size as u64);
+    let parent_id = pool.add(parent.clone(), &chain).unwrap();
+    let child = spend(&chain, OutPoint { txid: parent_id, vout: 0 }, parent.outputs()[0].value, 30 * size as u64);
+    let child_id = pool.add(child, &chain).unwrap();
+    let other = spend(&chain, coins[1], value(&coins[1]), 4 * size as u64);
+    let other_id = pool.add(other, &chain).unwrap();
+    // full; a newcomer paying 6 per byte: the parent pays 1 alone but 15.5 with its child, so the
+    // 4-per-byte transaction goes instead
+    let newcomer = spend(&chain, coins[2], value(&coins[2]), 6 * size as u64);
+    let newcomer_id = pool.add(newcomer, &chain).unwrap();
+    assert!(pool.contains(&parent_id) && pool.contains(&child_id) && pool.contains(&newcomer_id));
+    assert!(!pool.contains(&other_id));
+}

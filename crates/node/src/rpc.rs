@@ -228,7 +228,19 @@ pub(crate) fn tx_json(st: &crate::node::State, tx: &Tx, height: Option<u64>) -> 
                         Unlock::HtlcRefund { htlc } => {
                             json!({"kind": "htlc-refund", "hash": hex(&htlc.hash), "timeout": htlc.timeout})
                         }
+                        Unlock::DelayedOwner { d } => {
+                            json!({"kind": "delayed-owner", "owner": hex(&d.owner), "revoke": hex(&d.revoke), "delay": d.delay})
+                        }
+                        Unlock::DelayedRevoke { d } => {
+                            json!({"kind": "delayed-revoke", "owner": hex(&d.owner), "revoke": hex(&d.revoke), "delay": d.delay})
+                        }
+                        Unlock::RevocableClaim { h, preimage } => json!({"kind": "revocable-claim", "hash": hex(&h.hash),
+                            "preimage": hex(preimage), "timeout": h.timeout, "claim_delay": h.claim_delay}),
+                        Unlock::RevocableRefund { h } => json!({"kind": "revocable-refund", "hash": hex(&h.hash),
+                            "timeout": h.timeout, "refund_delay": h.refund_delay}),
+                        Unlock::RevocableRevoke { h } => json!({"kind": "revocable-revoke", "hash": hex(&h.hash)}),
                     };
+                    v["anyone_can_pay"] = json!(i.anyone_can_pay);
                     v["after_height"] = json!(i.after_height);
                     v["after_blocks"] = json!(i.after_blocks);
                     v["unlock"] = unlock;
@@ -500,9 +512,14 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
         }
         "conditionaddress" => {
             // the address that locks coins under a condition (CHAIN.md §4.1):
-            // ["multi2", pubkey_a, pubkey_b] or ["htlc", sha256_hash, claim, refund, timeout_height]
-            // (claim and refund: addresses or key hashes)
-            use requant_consensus::tx::{multi2_owner, Htlc};
+            // ["multi2", pubkey_a, pubkey_b] or ["htlc", sha256_hash, claim, refund, timeout_height]; from
+            // CHAIN.md §4.2 also ["delayed", owner, revoke, delay_blocks] and
+            // ["htlc-revocable", sha256_hash, claim, refund, revoke, timeout_height, claim_delay, refund_delay]
+            // (claim, refund, owner and revoke: addresses or key hashes)
+            use requant_consensus::tx::{multi2_owner, Delayed, Htlc, HtlcRevocable};
+            let u32_arg = |v: &Value| -> Result<u32, String> {
+                u64_param(v).and_then(|n| u32::try_from(n).map_err(|_| "expected a 32-bit number".to_string()))
+            };
             let net = &st.chain.net;
             let who = |v: &Value| -> Result<Hash, String> {
                 let s = v.as_str().ok_or("expected an address or key hash")?;
@@ -514,7 +531,18 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                     Htlc { hash: hash_param(arg(1)?)?, claim: who(arg(2)?)?, refund: who(arg(3)?)?, timeout: u64_param(arg(4)?)? }
                         .owner()
                 }
-                _ => return Err("expected parameter 0: \"multi2\" or \"htlc\"".into()),
+                Some("delayed") => Delayed { owner: who(arg(1)?)?, revoke: who(arg(2)?)?, delay: u32_arg(arg(3)?)? }.owner_hash(),
+                Some("htlc-revocable") => HtlcRevocable {
+                    hash: hash_param(arg(1)?)?,
+                    claim: who(arg(2)?)?,
+                    refund: who(arg(3)?)?,
+                    revoke: who(arg(4)?)?,
+                    timeout: u64_param(arg(5)?)?,
+                    claim_delay: u32_arg(arg(6)?)?,
+                    refund_delay: u32_arg(arg(7)?)?,
+                }
+                .owner(),
+                _ => return Err("expected parameter 0: multi2, htlc, delayed or htlc-revocable".into()),
             };
             Ok(json!({"key_hash": hex(&owner), "address": requant_consensus::address::address(net, &owner)}))
         }

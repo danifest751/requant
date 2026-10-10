@@ -91,6 +91,23 @@ requant-wallet encrypt my.wallet              # change the passphrase
 requant-wallet restore new.wallet             # from the phrase; asks a node which addresses were used
 ```
 
+**Spending conditions** (CHAIN.md §4.1–4.2): describe a condition, lock coins with an ordinary `send` to
+its address, spend them along one path. The wallet sets the time locks the path needs.
+
+```sh
+requant-wallet secret                                          # a 32-byte secret and its sha256
+requant-wallet pubkey my.wallet                                # public key of the current address
+requant-wallet condition htlc <sha256> <claim addr> <refund addr> <timeout height> --out htlc.json
+requant-wallet condition multi2 <pubkey A> <pubkey B> --out m2.json
+requant-wallet condition delayed <owner addr> <revoke addr> <delay blocks> --out d.json
+requant-wallet send my.wallet <condition address> 1            # lock 1 RQT under it
+requant-wallet spend-condition my.wallet htlc.json claim <to> --preimage <secret>
+requant-wallet spend-condition my.wallet htlc.json refund <to>   # from the timeout height
+requant-wallet spend-condition a.wallet m2.json both <to> --out part.json   # first signature
+requant-wallet cosign b.wallet part.json                       # second signature, then sends
+```
+
+`--anyone-can-pay` signs only the input and the outputs, so others may add inputs later.
 Change goes to a new change address each time. A restore scans each chain until 20 unused addresses in a
 row; `--no-scan` restores without a node (the other addresses come back with a later restore).
 A deposit list handed out at once has long runs of unused addresses that a scan would stop in:
@@ -172,8 +189,10 @@ A CMP 50HX (Turing) does about 3.6 M tickets/s, an RTX 5070 about 5 M, an RTX 30
 
 ## Known limits of this version
 
-Block-first sync (no headers-first yet), address book in memory and `peers.txt` only; see `ROADMAP.md`.
 Spending conditions and time locks (CHAIN.md §4.1) are active from height 1400; nodes older than 0.15.0
-reject blocks that use them. RPC `conditionaddress` gives the address of a 2-of-2 or HTLC; there is no
-swap or channel software yet ([SWAPS.md](SWAPS.md)).
+reject blocks that use them. Revocable outputs, revocable HTLCs and anyone-can-pay signatures (§4.2)
+are active from height **4700**: nodes older than 0.16.0 leave the network at the first block that uses
+them, so upgrade before then. RPC `conditionaddress` gives the address of any condition; the wallet
+locks and spends them (below); there is no swap or channel software yet ([SWAPS.md](SWAPS.md)).
+Packages are not relayed: every transaction must pay the minimum fee rate on its own.
 Upgrading nodes: `deploy/README.md`.

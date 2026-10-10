@@ -3,8 +3,14 @@
 //! transactions spend the same output; blocks take parents before children.
 //!
 //! Spam bounds: a fee of at least `MIN_FEE_RATE` atoms per byte; when the pool is full, a transaction
-//! paying a higher rate pushes out the lowest-rate ones (with what spends them); transactions waiting
-//! longer than `MAX_AGE` are dropped.
+//! paying a higher rate pushes out the lowest-rate ones (with what spends them, and judged with them, so
+//! a well-paying child protects its parent); transactions waiting longer than `MAX_AGE` are dropped.
+//!
+//! Fee bumping: blocks take transactions by the rate of the package they complete (a transaction with
+//! its unconfirmed ancestors), so a child paying well pulls a cheap parent in (child pays for parent).
+//! A transaction that spends what a pooled one spends replaces it (and its descendants) when it pays
+//! more in total, by at least its own size at the minimum rate, and a higher rate than each one it
+//! conflicts with directly (replace by fee).
 
 use requant_consensus::chain::Chain;
 use requant_consensus::params::MAX_AMOUNT;
@@ -20,6 +26,8 @@ pub const MAX_ANCESTORS: usize = 25;
 pub const MIN_FEE_RATE: u64 = 1;
 /// Seconds a transaction may wait in the pool.
 pub const MAX_AGE: u64 = 72 * 3600;
+/// Most pooled transactions (with descendants) one replacement may evict.
+pub const MAX_REPLACED: usize = 100;
 
 struct Entry {
     tx: Tx,
@@ -173,9 +181,13 @@ impl Mempool {
         requant_consensus::chain::check_activation(&chain.net, &tx, chain.height() + 1)?;
         let mut total_in: u64 = 0;
         let mut parents = Vec::new();
+        // pooled transactions spending the same outputs: replaced if this one pays enough (below)
+        let mut conflicts: Vec<Hash> = Vec::new();
         for i in inputs {
-            if self.spends.contains_key(&i.prev) {
-                return Err(Error::Invalid("conflicts with a pooled transaction"));
+            if let Some(other) = self.spends.get(&i.prev) {
+                if !conflicts.contains(other) {
+                    conflicts.push(*other);
+                }
             }
             let (out, parent) = self.coin(chain, &i.prev)?;
             if i.owner()? != out.pkh {
@@ -207,7 +219,11 @@ impl Mempool {
         if anc.len() > MAX_ANCESTORS {
             return Err(Error::Invalid("too many unconfirmed ancestors"));
         }
+        let replaced = self.replacement(&conflicts, &anc, fee, size)?;
         tx.check_signatures(&chain.net.chain_id)?;
+        for id in &replaced {
+            self.remove(id);
+        }
         self.make_room(size, fee, &anc)?;
         for i in inputs {
             self.spends.insert(i.prev, txid);
@@ -216,6 +232,43 @@ impl Mempool {
         self.seq += 1;
         self.txs.insert(txid, Entry { tx, fee, size, parents, seq: self.seq, time: crate::node::now() });
         Ok(txid)
+    }
+
+    /// What admitting a transaction paying `fee` for `size` bytes would evict: the pooled transactions it
+    /// conflicts with and their descendants, if it may replace them (see the module documentation).
+    fn replacement(
+        &self,
+        conflicts: &[Hash],
+        ancestors: &HashSet<Hash>,
+        fee: u64,
+        size: usize,
+    ) -> Result<Vec<Hash>, Error> {
+        if conflicts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut replaced: Vec<Hash> = Vec::new();
+        for c in conflicts {
+            for d in self.descendants(c) {
+                if !replaced.contains(&d) {
+                    replaced.push(d);
+                }
+            }
+        }
+        if replaced.len() > MAX_REPLACED {
+            return Err(Error::Invalid("replacement would evict too many transactions"));
+        }
+        // it cannot depend on what it replaces
+        if replaced.iter().any(|r| ancestors.contains(r)) {
+            return Err(Error::Invalid("replacement spends a transaction it replaces"));
+        }
+        let old: u64 = replaced.iter().map(|r| self.txs[r].fee).sum();
+        if fee < old.saturating_add(size as u64 * MIN_FEE_RATE) {
+            return Err(Error::Invalid("replacement must pay more than what it replaces, plus its own size"));
+        }
+        if conflicts.iter().any(|c| !lower_rate((self.txs[c].fee, self.txs[c].size), (fee, size))) {
+            return Err(Error::Invalid("replacement must pay a higher fee rate than what it replaces"));
+        }
+        Ok(replaced)
     }
 
     /// Pooled transactions that spend `txid`'s outputs, directly or further down.
@@ -240,21 +293,32 @@ impl Mempool {
     /// descendants), never the new one's ancestors and never one paying at least its rate.
     fn make_room(&mut self, size: usize, fee: u64, ancestors: &HashSet<Hash>) -> Result<(), Error> {
         while self.bytes + size > self.max_bytes {
-            let victim = self
+            // a transaction is judged by the better of its own rate and that of it with its descendants,
+            // so a well-paying child keeps its parent
+            let children = self.children();
+            let mut memo: HashMap<Hash, (u64, usize)> = HashMap::new();
+            let scores: Vec<(Hash, (u64, usize), u64)> = self
                 .txs
                 .iter()
                 .filter(|(id, _)| !ancestors.contains(*id))
+                .map(|(id, e)| {
+                    let own = (e.fee, e.size);
+                    let with = self.with_descendants(id, &children, &mut memo);
+                    (*id, if lower_rate(own, with) { with } else { own }, e.seq)
+                })
+                .collect();
+            let victim = scores
+                .into_iter()
                 .min_by(|a, b| {
-                    let (x, y) = ((a.1.fee, a.1.size), (b.1.fee, b.1.size));
-                    if lower_rate(x, y) {
+                    if lower_rate(a.1, b.1) {
                         std::cmp::Ordering::Less
-                    } else if lower_rate(y, x) {
+                    } else if lower_rate(b.1, a.1) {
                         std::cmp::Ordering::Greater
                     } else {
-                        b.1.seq.cmp(&a.1.seq) // equal rate: the newest goes first
+                        b.2.cmp(&a.2) // equal rate: the newest goes first
                     }
                 })
-                .map(|(id, e)| (*id, e.fee, e.size));
+                .map(|(id, score, _)| (id, score.0, score.1));
             match victim {
                 Some((id, f, s)) if lower_rate((f, s), (fee, size)) => {
                     for d in self.descendants(&id) {
@@ -265,6 +329,44 @@ impl Mempool {
             }
         }
         Ok(())
+    }
+
+    /// Pooled children of every pooled transaction.
+    fn children(&self) -> HashMap<Hash, Vec<Hash>> {
+        let mut m: HashMap<Hash, Vec<Hash>> = HashMap::new();
+        for (id, e) in &self.txs {
+            for p in &e.parents {
+                m.entry(*p).or_default().push(*id);
+            }
+        }
+        m
+    }
+
+    /// Fee and size of `id` with all its pooled descendants (each counted once).
+    fn with_descendants(
+        &self,
+        id: &Hash,
+        children: &HashMap<Hash, Vec<Hash>>,
+        memo: &mut HashMap<Hash, (u64, usize)>,
+    ) -> (u64, usize) {
+        if let Some(v) = memo.get(id) {
+            return *v;
+        }
+        let mut seen = HashSet::new();
+        let mut stack = vec![*id];
+        let (mut fee, mut size) = (0u64, 0usize);
+        while let Some(cur) = stack.pop() {
+            if !seen.insert(cur) {
+                continue;
+            }
+            if let Some(e) = self.txs.get(&cur) {
+                fee += e.fee;
+                size += e.size;
+            }
+            stack.extend(children.get(&cur).into_iter().flatten().copied());
+        }
+        memo.insert(*id, (fee, size));
+        (fee, size)
     }
 
     fn remove(&mut self, txid: &Hash) {
@@ -319,28 +421,92 @@ impl Mempool {
         }
     }
 
-    /// Transactions for a block, highest fee rate first but never a child before its parents, up to
-    /// `max_bytes`; returns them with their total fee.
+    /// Transactions for a block, up to `max_bytes`, best package first: each transaction is ranked by the
+    /// rate of itself with its ancestors not yet taken, and taken together with them, parents first (so a
+    /// child paying well pulls a cheap parent in). Returns them with their total fee.
     pub fn select(&self, max_bytes: usize) -> (Vec<Tx>, u64) {
-        let mut v: Vec<(&Hash, &Entry)> = self.txs.iter().collect();
-        v.sort_by(|(_, a), (_, b)| {
-            (b.fee as u128 * a.size as u128).cmp(&(a.fee as u128 * b.size as u128)).then(a.seq.cmp(&b.seq))
-        });
-        let (mut chosen, mut set, mut used, mut fees) = (Vec::new(), HashSet::new(), 0usize, 0u64);
-        loop {
-            let mut progress = false;
-            for (id, e) in &v {
-                if set.contains(*id) || used + e.size > max_bytes || !e.parents.iter().all(|p| set.contains(p)) {
-                    continue;
+        use std::collections::BinaryHeap;
+        // ranked by (fee, size) of the package, compared without division; ties: earlier arrival first
+        #[derive(PartialEq, Eq)]
+        struct Rank(u64, usize, u64, Hash, u64);
+        impl Ord for Rank {
+            fn cmp(&self, o: &Self) -> std::cmp::Ordering {
+                (self.0 as u128 * o.1 as u128)
+                    .cmp(&(o.0 as u128 * self.1 as u128))
+                    .then(o.2.cmp(&self.2))
+                    .then(self.4.cmp(&o.4))
+            }
+        }
+        impl PartialOrd for Rank {
+            fn partial_cmp(&self, o: &Self) -> Option<std::cmp::Ordering> {
+                Some(self.cmp(o))
+            }
+        }
+        let children = self.children();
+        let mut taken: HashSet<Hash> = HashSet::new();
+        let mut skipped: HashSet<Hash> = HashSet::new();
+        // the package of `id`: it with its ancestors not yet taken, parents first
+        let package = |id: &Hash, taken: &HashSet<Hash>| -> Vec<Hash> {
+            let mut anc = HashSet::new();
+            self.ancestors(id, &mut anc);
+            let mut v: Vec<Hash> = anc.into_iter().filter(|a| !taken.contains(a)).collect();
+            v.push(*id);
+            // parents before children: a transaction's depth is at least one more than any parent's
+            let mut depth: HashMap<Hash, usize> = HashMap::new();
+            fn depth_of(m: &Mempool, id: &Hash, memo: &mut HashMap<Hash, usize>) -> usize {
+                if let Some(d) = memo.get(id) {
+                    return *d;
                 }
-                set.insert(**id);
+                let d =
+                    m.txs.get(id).map_or(0, |e| e.parents.iter().map(|p| depth_of(m, p, memo) + 1).max().unwrap_or(0));
+                memo.insert(*id, d);
+                d
+            }
+            v.sort_by_key(|t| (depth_of(self, t, &mut depth), self.txs[t].seq));
+            v
+        };
+        let score = |pkg: &[Hash]| -> (u64, usize) {
+            pkg.iter().fold((0u64, 0usize), |(f, s), t| (f + self.txs[t].fee, s + self.txs[t].size))
+        };
+        let mut version: HashMap<Hash, u64> = HashMap::new();
+        let mut heap = BinaryHeap::new();
+        for (id, e) in &self.txs {
+            let (f, s) = score(&package(id, &taken));
+            heap.push(Rank(f, s, e.seq, *id, 0));
+        }
+        let (mut chosen, mut used, mut fees) = (Vec::new(), 0usize, 0u64);
+        while let Some(Rank(_, size, _, id, ver)) = heap.pop() {
+            if taken.contains(&id) || skipped.contains(&id) || version.get(&id).copied().unwrap_or(0) != ver {
+                continue;
+            }
+            if used + size > max_bytes {
+                skipped.insert(id);
+                continue;
+            }
+            let pkg = package(&id, &taken);
+            for t in &pkg {
+                let e = &self.txs[t];
+                taken.insert(*t);
                 used += e.size;
                 fees += e.fee;
                 chosen.push(e.tx.clone());
-                progress = true;
             }
-            if !progress {
-                break;
+            // their descendants now have fewer ancestors left: rank them again
+            let mut again: Vec<Hash> = Vec::new();
+            let mut stack: Vec<Hash> = pkg.clone();
+            while let Some(cur) = stack.pop() {
+                for c in children.get(&cur).into_iter().flatten() {
+                    if !taken.contains(c) && !again.contains(c) {
+                        again.push(*c);
+                        stack.push(*c);
+                    }
+                }
+            }
+            for c in again {
+                let v = version.entry(c).or_insert(0);
+                *v += 1;
+                let (f, s) = score(&package(&c, &taken));
+                heap.push(Rank(f, s, self.txs[&c].seq, c, *v));
             }
         }
         (chosen, fees)

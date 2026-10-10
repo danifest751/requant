@@ -61,11 +61,19 @@ test network.
 - [x] Spending conditions and time locks in consensus (node 0.15.0, CHAIN.md §4.1): 2-of-2, HTLC with a
       32-byte SHA-256 preimage, absolute and relative locks; test network from height 1400, main network
       from genesis. The primitives for swaps and channels, so that they need no hard fork later.
+- [x] Revocable outputs, revocable HTLCs and anyone-can-pay signatures (node 0.16.0, CHAIN.md §4.2): the
+      templates two-way channels with a penalty and routed payments need; test network from height 4700.
+- [x] Pool policy (node 0.16.0, CHAIN.md §4.3): blocks rank packages (child pays for parent), eviction
+      keeps a parent with a well-paying child, replace by fee.
 - [x] RPC token (`--rpc-token-file`; clients send `REQUANT_RPC_TOKEN`).
 
 ## 2a. Swaps and channels (software on the §4.1 primitives; [SWAPS.md](SWAPS.md))
 
-- [ ] Pool policy: child-pays-for-parent (or a fee output) so pre-signed refunds can be bumped.
+- [x] Pool policy: child-pays-for-parent and replace by fee (node 0.16.0); anyone-can-pay inputs.
+- [x] Wallet commands for conditions: `condition`, `spend-condition` (every path, with its locks),
+      `cosign` for 2-of-2, `secret`, `pubkey` (wallet 0.5.0).
+- [ ] Package relay, so a pre-signed parent below the minimum fee can travel with its child.
+- [ ] Two-way channels on the revocable templates; routed payments over revocable HTLCs.
 - [ ] One-way payment channels for MagnetGate (deposit, expiry refund, payment states).
 - [ ] HTLC swaps with Bitcoin-family chains and EVM; maker bot; documented privacy limits.
 - [ ] RQT↔XMR swaps: ed25519 adaptor signatures, MuSig2 key aggregation, cancel/refund/punish
