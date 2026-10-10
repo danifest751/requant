@@ -261,7 +261,8 @@ tr.sub td:first-child{padding-left:22px}.tree{color:var(--line);margin-right:8px
 .pills{display:flex;gap:6px;flex-wrap:wrap}.pill{font-size:12px;padding:4px 10px;border-radius:999px;background:var(--card);border:1px solid var(--line);color:var(--mut)}.pill b{color:var(--fg)}
 .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
 .kpi{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
-.kpi .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.05em}.kpi .v{font-size:24px;font-weight:750;margin-top:4px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.kpi .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.05em}.kpi .v{font-size:22px;font-weight:750;margin-top:4px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.kpi .v small{font-size:13px;font-weight:500;opacity:.75;margin-left:4px}
 .kpi .h{color:var(--mut);font-size:12px;margin-top:3px}.kpi .bar{margin-top:8px}
 .kpi.main{background:linear-gradient(135deg,#0f766e,#4f46e5);color:#fff;border:0}.kpi.main .k,.kpi.main .h{color:rgba(255,255,255,.82)}
 .panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow)}
@@ -813,6 +814,18 @@ fn kpi(k: &str, v: &str, h: &str, main: bool) -> String {
     )
 }
 
+/// A value with its SI prefix and a small unit: `8.71<small>M tickets/s</small>`.
+fn unit(v: f64, u: &str) -> String {
+    let s = si(v);
+    let (num, prefix) = s.split_once(' ').unwrap_or((&s, ""));
+    format!("{num}<small>{prefix} {u}</small>")
+}
+
+/// RQT with two decimals, for large figures.
+fn rqt2(atoms: u64) -> String {
+    format!("{:.2}", atoms as f64 / 1e8)
+}
+
 fn rqt(atoms: u64) -> String {
     let s = format_amount(atoms);
     let t = s.trim_end_matches('0').trim_end_matches('.');
@@ -846,22 +859,27 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
         s["share_bits"],
     );
     body += "<div class=\"kpis\">";
-    body += &kpi("Pool rate", &format!("{}tickets/s", si(rate)), &format!("{share:.1}% of the network"), true);
+    body += &kpi("Pool rate", &unit(rate, "tickets/s"), &format!("{share:.1}% of the network"), true);
     body += &kpi(
         "Network rate",
-        &format!("{}tickets/s", si(net)),
+        &unit(net, "tickets/s"),
         &format!("difficulty {}tickets / block", si(f(&s["difficulty"]))),
         false,
     );
+    let (dev, addrs) = (n(&s["devices"]), miners.len());
     body += &kpi(
         "Miners",
         &format!("{}", active.len()),
-        &format!("{} devices online · {} addresses known", n(&s["devices"]), miners.len()),
+        &format!(
+            "{dev} device{} online · {addrs} address{} known",
+            if dev == 1 { "" } else { "s" },
+            if addrs == 1 { "" } else { "es" }
+        ),
         false,
     );
     body += &kpi(
         "Blocks found",
-        &format!("{} <span style=\"font-size:14px;font-weight:500\">in 24 h</span>", n(&s["blocks_24h"])),
+        &format!("{}<small>in 24 h</small>", n(&s["blocks_24h"])),
         &format!("{} in total · {last}", n(&s["blocks_total"])),
         false,
     );
@@ -876,17 +894,19 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
     );
     body += &kpi(
         "Paid out",
-        &format!("{} RQT", rqt(n(&s["paid_total"]))),
+        &format!("{}<small>RQT</small>", rqt2(n(&s["paid_total"]))),
         &format!("{} payouts", n(&s["payouts_total"])),
         false,
     );
     body += "</div>";
 
     // the day's rates, and how to start
-    let hist = s["history"].as_array().cloned().unwrap_or_default();
-    let series = |k: usize| hist.iter().filter_map(|h| Some((h[0].as_u64()?, h[k].as_f64()?))).collect::<Vec<_>>();
+    let hourly = s["hourly"].as_array().cloned().unwrap_or_default();
+    let series = |k: usize| hourly.iter().filter_map(|h| Some((h[0].as_u64()?, h[k].as_f64()?))).collect::<Vec<_>>();
     body += &format!(
-        "<div class=\"grid2\"><div class=\"panel\"><h3>Rate, last 24 hours</h3>{}</div>",
+        "<div class=\"grid2\"><div class=\"panel\"><h3>Rate by the hour, last 24 hours</h3>{}\
+         <p style=\"margin-top:8px\">From the blocks: the work of the blocks found each hour, the pool's and the whole \
+         network's, in tickets per second.</p></div>",
         chart(&[("pool", "var(--acc)", series(1)), ("network", "var(--acc2)", series(2))], "")
     );
     body += &format!(
@@ -976,7 +996,7 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
     if blocks.is_empty() {
         body += "<tr><td colspan=\"5\" class=\"empty\">No blocks yet.</td></tr>";
     }
-    for b in blocks.iter().take(25) {
+    for b in blocks.iter().take(15) {
         let status = b["status"].as_str().unwrap_or("");
         let conf = n(&b["confirmations"]).min(maturity);
         let state = if status == "immature" {
@@ -1005,7 +1025,7 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
     if payouts.is_empty() {
         body += "<tr><td colspan=\"5\" class=\"empty\">No payouts yet: balances are paid once they reach the minimum and the blocks have matured.</td></tr>";
     }
-    for p in payouts.iter().take(25) {
+    for p in payouts.iter().take(15) {
         let t = p["txid"].as_str().unwrap_or("");
         body += &format!(
             "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{} <span class=\"mut\">· {} ago</span></td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
@@ -1044,27 +1064,32 @@ fn miner_page(m: &serde_json::Value, host: &str, port: u64) -> String {
     body += "<div class=\"kpis\">";
     body += &kpi(
         "Rate",
-        &format!("{}tickets/s", si(f(&m["tickets_per_s"]))),
+        &unit(f(&m["tickets_per_s"]), "tickets/s"),
         &format!("{:.1}% of the pool", f(&m["share_of_pool"]) * 100.0),
         true,
     );
     body += &format!(
-        "<div class=\"kpi\"><div class=\"k\">Balance</div><div class=\"v\">{} RQT</div><div class=\"bar\"><span style=\"width:{pct:.0}%\"></span></div>\
+        "<div class=\"kpi\"><div class=\"k\">Balance</div><div class=\"v\">{}<small>RQT</small></div><div class=\"bar\"><span style=\"width:{pct:.0}%\"></span></div>\
          <div class=\"h\">{pct:.0}% of the {} RQT minimum; paid every {} min</div></div>",
-        rqt(bal),
+        rqt2(bal),
         rqt(min_payout),
         n(&m["payout_every_s"]).max(60) / 60
     );
-    body += &kpi("Maturing", &format!("{} RQT", rqt(n(&m["immature"]))), "credited once its blocks mature", false);
+    body += &kpi(
+        "Maturing",
+        &format!("{}<small>RQT</small>", rqt2(n(&m["immature"]))),
+        "credited once its blocks mature",
+        false,
+    );
     body += &kpi(
         "Paid",
-        &format!("{} RQT", rqt(n(&m["paid"]))),
+        &format!("{}<small>RQT</small>", rqt2(n(&m["paid"]))),
         &format!("{} payouts", m["payouts"].as_array().map(|p| p.len()).unwrap_or(0)),
         false,
     );
     body += &kpi(
         "Devices",
-        &format!("{online} online"),
+        &format!("{online}<small>online</small>"),
         &format!("{} known · {} blocks found", workers.len(), n(&m["blocks_found"])),
         false,
     );

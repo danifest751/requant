@@ -757,6 +757,42 @@ fn sample(st: &State, pool: &mut Pool, t: u64) -> bool {
     true
 }
 
+/// The last day by the hour, from the chain itself (available at once, no sampling needed): the network's
+/// rate (expected tickets of its blocks per second) and the pool's (of the blocks it found).
+fn hourly(st: &State, pool: &Pool, t: u64) -> Vec<Value> {
+    let start = t.saturating_sub(24 * 3600);
+    let mut net = [0f64; 24];
+    let mut mine = [0f64; 24];
+    let bucket = |time: u64| ((time.saturating_sub(start)) / 3600).min(23) as usize;
+    let mut h = st.chain.height();
+    while let Some(b) = st.chain.active_id(h).and_then(|id| st.chain.block(&id)) {
+        if b.header.time < start || h == 0 {
+            break;
+        }
+        net[bucket(b.header.time)] += u256_f64(&U256::work(&b.header.target));
+        h -= 1;
+    }
+    for f in pool.found.iter().rev() {
+        if f.time < start {
+            break;
+        }
+        if f.status == "orphaned" {
+            continue;
+        }
+        if let Some(b) = st.chain.block(&f.id) {
+            mine[bucket(f.time)] += u256_f64(&U256::work(&b.header.target));
+        }
+    }
+    // the current hour is partial: rate over the part that has passed
+    (0..24)
+        .map(|k| {
+            let from = start + k as u64 * 3600;
+            let span = (t.min(from + 3600).saturating_sub(from)).max(60) as f64;
+            json!([from + 1800, mine[k] / span, net[k] / span])
+        })
+        .collect()
+}
+
 fn immature_by_miner(pool: &Pool) -> HashMap<Hash, u64> {
     let mut immature: HashMap<Hash, u64> = HashMap::new();
     for c in &pool.immature {
@@ -826,6 +862,7 @@ pub fn stats(st: &State) -> Option<Value> {
         "difficulty": difficulty,
         "devices": per_dev.values().filter(|r| **r > 0.0).count(),
         "history": pool.history.iter().map(|h| json!([h.0, h.1, h.2, h.3])).collect::<Vec<_>>(),
+        "hourly": hourly(st, pool, t),
         // the network around the pool: addresses and transactions on the best chain
         "network": {
             "addresses_holding": st.chain.holder_count(),
