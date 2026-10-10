@@ -27,8 +27,17 @@ enum Status {
     Invalid,
 }
 
+/// Where block bodies dropped from memory are read back from (the node's block file). Bodies of best-chain
+/// blocks deeper than the keep window are dropped once a source is set: the index (headers, work, status)
+/// stays in memory, the transactions do not.
+pub trait BodySource: Send + Sync {
+    fn load(&self, id: &Hash) -> Option<Block>;
+}
+
 struct Entry {
-    block: Arc<Block>,
+    header: Header,
+    /// The block while it is held in memory (recent and side-chain blocks); otherwise read from the source.
+    block: Option<Arc<Block>>,
     height: u64,
     time: u64,
     /// Cumulative work up to and including this block.
@@ -65,6 +74,11 @@ pub struct Chain {
     max_reorg: u64,
     /// The reorganisation limit applies only once the tip has this much cumulative work.
     min_chain_work: U256,
+    /// Where dropped bodies are read back from, how many recent best-chain blocks keep theirs, and the
+    /// height up to which best-chain bodies have been dropped.
+    bodies: Option<Arc<dyn BodySource>>,
+    keep_bodies: u64,
+    dropped_to: u64,
 }
 
 /// Rejection reason for a fork below the reorganisation limit: node policy, so peers are not punished for it.
@@ -83,7 +97,8 @@ impl Chain {
             work: U256::work(&g.header.target),
             issued: 0,
             status: Status::Valid,
-            block: Arc::new(g),
+            header: g.header,
+            block: Some(Arc::new(g)),
         };
         let min_chain_work = net.min_chain_work;
         let mut c = Chain {
@@ -98,6 +113,9 @@ impl Chain {
             disconnected: Vec::new(),
             max_reorg: u64::MAX,
             min_chain_work,
+            bodies: None,
+            keep_bodies: u64::MAX,
+            dropped_to: 0,
         };
         c.entries.insert(id, entry);
         c.undo.insert(id, Vec::new());
@@ -121,8 +139,50 @@ impl Chain {
         self.entries[&self.tip()].work
     }
 
+    /// A stored block: from memory, or read back from the body source.
     pub fn block(&self, id: &Hash) -> Option<Arc<Block>> {
-        self.entries.get(id).map(|e| e.block.clone())
+        let e = self.entries.get(id)?;
+        match &e.block {
+            Some(b) => Some(b.clone()),
+            None => self.bodies.as_ref()?.load(id).map(Arc::new),
+        }
+    }
+
+    /// A known block's header (always in memory).
+    pub fn header(&self, id: &Hash) -> Option<Header> {
+        self.entries.get(id).map(|e| e.header)
+    }
+
+    /// The body of a block the chain knows, which must be readable (memory or source).
+    fn body(&self, id: &Hash) -> Arc<Block> {
+        self.block(id).expect("the body of a known block is in memory or in the block file")
+    }
+
+    /// Keep only the last `keep` best-chain bodies in memory, reading older ones back from `source`.
+    pub fn set_body_source(&mut self, source: Arc<dyn BodySource>, keep: u64) {
+        self.bodies = Some(source);
+        self.keep_bodies = keep.max(1);
+        self.drop_bodies();
+    }
+
+    /// Bodies held in memory (for statistics).
+    pub fn bodies_in_memory(&self) -> usize {
+        self.entries.values().filter(|e| e.block.is_some()).count()
+    }
+
+    /// Drop the bodies of best-chain blocks deeper than the keep window (genesis stays).
+    fn drop_bodies(&mut self) {
+        if self.bodies.is_none() {
+            return;
+        }
+        let limit = self.height().saturating_sub(self.keep_bodies);
+        while self.dropped_to < limit {
+            self.dropped_to += 1;
+            let id = self.active[self.dropped_to as usize];
+            if let Some(e) = self.entries.get_mut(&id) {
+                e.block = None;
+            }
+        }
     }
 
     pub fn active_id(&self, height: u64) -> Option<Hash> {
@@ -247,7 +307,7 @@ impl Chain {
         }
         let mut id = *from;
         while self.entries[&id].height > height {
-            id = self.entries[&id].block.header.prev;
+            id = self.entries[&id].header.prev;
         }
         id
     }
@@ -261,7 +321,7 @@ impl Chain {
             if times.len() == MTP_WINDOW || e.height == 0 {
                 break;
             }
-            id = e.block.header.prev;
+            id = e.header.prev;
         }
         times.sort_unstable();
         times[times.len() / 2]
@@ -286,7 +346,7 @@ impl Chain {
             if self.on_active(&id) {
                 return Some(self.entries[&id].height);
             }
-            id = self.entries[&id].block.header.prev;
+            id = self.entries[&id].header.prev;
         }
         None
     }
@@ -413,11 +473,13 @@ impl Chain {
             work: parent.work.saturating_add(&U256::work(&block.header.target)),
             issued: parent.issued.saturating_add(reward(parent.issued)),
             status: Status::Checked,
-            block: Arc::new(block),
+            header: block.header,
+            block: Some(Arc::new(block)),
         };
         self.entries.insert(id, entry);
         let before = self.tip();
         let disconnected = self.activate_best(Some(id));
+        self.drop_bodies();
         if self.entries[&id].status == Status::Invalid {
             return Err(Error::Invalid(self.last_failure));
         }
@@ -448,7 +510,7 @@ impl Chain {
             if self.on_active(&id) || e.height == 0 {
                 return false;
             }
-            id = e.block.header.prev;
+            id = e.header.prev;
         }
     }
 
@@ -506,7 +568,7 @@ impl Chain {
         let mut id = *target;
         while !self.on_active(&id) {
             branch.push(id);
-            id = self.entries[&id].block.header.prev;
+            id = self.entries[&id].header.prev;
         }
         let fork_height = self.entries[&id].height;
         let old: Vec<Hash> = self.active[fork_height as usize + 1..].to_vec();
@@ -528,13 +590,13 @@ impl Chain {
                 return Err((*b, reason));
             }
         }
-        self.disconnected = old.iter().map(|id| self.entries[id].block.clone()).collect();
+        self.disconnected = old.iter().map(|id| self.body(id)).collect();
         Ok(old.len())
     }
 
     /// Apply a block's transactions to the UTXO set (CHAIN.md §5 items 6–7) and append it to `active`.
     fn connect(&mut self, id: &Hash) -> Result<(), Error> {
-        let block = self.entries[id].block.clone();
+        let block = self.body(id);
         let height = block.header.height;
         let parent_issued = self.entries[&block.header.prev].issued;
         let mut spent: Vec<(OutPoint, Coin)> = Vec::new();
@@ -615,7 +677,7 @@ impl Chain {
     /// Undo the tip block.
     fn disconnect(&mut self, id: &Hash) {
         assert_eq!(self.tip(), *id, "disconnect only the tip");
-        let block = self.entries[id].block.clone();
+        let block = self.body(id);
         // restore spent coins first, then remove the block's outputs: an output created and spent inside the
         // block appears in both and must end up absent (the reverse order would resurrect it)
         for (op, coin) in self.undo.remove(id).unwrap_or_default() {

@@ -156,6 +156,7 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "chainwork": hex(&st.chain.tip_work().to_be_bytes()),
                 "load": crate::load::pressure().map(|p| json!({"cpu_per_core": p.cpu, "memory_free": p.mem_free, "busy": st.busy})),
                 "uploaded_bytes": st.uploaded(),
+                "bodies_in_memory": st.chain.bodies_in_memory(),
                 "update_available": st.release.as_ref().filter(|r| r.version > crate::release::own_version())
                     .map(|r| r.version_string()),
                 "issued_atoms": st.chain.issued(),

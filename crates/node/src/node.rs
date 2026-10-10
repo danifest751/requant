@@ -51,6 +51,9 @@ const BAN_SECS: u64 = 3600;
 static UPLOADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const UPLOAD_PERIOD: u64 = 30 * 86_400;
 
+/// Best-chain blocks whose bodies stay in memory; older ones are read back from `blocks.dat` when needed.
+pub const KEEP_BODIES: u64 = 2000;
+
 /// Misbehaviour points that get a peer banned.
 pub const BAN_SCORE: u32 = 100;
 /// Messages a peer may send per second on average, and at once.
@@ -183,6 +186,8 @@ pub struct State {
     pub index: TxIndex,
     pub book: AddrBook,
     store: Store,
+    /// Where the bodies in `store` are, for the chain to read old ones back.
+    bodies: Arc<crate::store::Bodies>,
     /// Orphans with the peer that sent them and their size.
     orphans: HashMap<Hash, (Block, Option<u64>, usize)>,
     orphan_bytes: usize,
@@ -389,8 +394,9 @@ impl State {
                         first = Some(acc);
                     }
                     self.headers.add_valid(&b.header, &b.claim);
-                    if let Err(e) = self.store.append(&bytes) {
-                        eprintln!("store: {e}");
+                    match self.store.append(&bytes) {
+                        Ok(at) => self.bodies.insert(id, at, bytes.len()),
+                        Err(e) => eprintln!("store: {e}"),
                     }
                     if let Accepted::Reorg { disconnected } = acc {
                         if disconnected >= 2 {
@@ -995,14 +1001,17 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         )));
     }
     let (store, records) = Store::open(&dir)?;
+    let bodies = Arc::new(store.bodies(cfg.net.clone())?);
     let mut chain = Chain::new(cfg.net.clone(), cfg.threads);
     chain.set_max_reorg(cfg.max_reorg);
     let mut replayed = 0;
     for rec in records {
-        match Block::decode(&rec, &cfg.net)
-            .map_err(|e| e.to_string())
-            .and_then(|b| chain.accept_trusted(b).map_err(|e| e.to_string()))
-        {
+        let r = Block::decode(&rec.data, &cfg.net).map_err(|e| e.to_string()).and_then(|b| {
+            // where each block's record is, for reading its body back once it leaves memory
+            bodies.insert(b.id(&cfg.net), rec.offset, rec.data.len());
+            chain.accept_trusted(b).map_err(|e| e.to_string())
+        });
+        match r {
             Ok(_) => replayed += 1,
             Err(e) => eprintln!("replay: skipping a stored block ({e})"),
         }
@@ -1018,6 +1027,10 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         let b = chain.block(&chain.active_id(h).unwrap()).unwrap();
         headers.add_valid(&b.header, &b.claim);
     }
+    // from here on only the recent bodies stay in memory
+    // REQUANT_KEEP_BODIES overrides the window (to exercise reading bodies back in tests)
+    let keep = std::env::var("REQUANT_KEEP_BODIES").ok().and_then(|v| v.parse().ok()).unwrap_or(KEEP_BODIES);
+    chain.set_body_source(bodies.clone(), keep);
     let allow_local = cfg.net.name == "regtest";
     let listener = TcpListener::bind(cfg.listen)?;
     let p2p = listener.local_addr()?;
@@ -1029,6 +1042,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         index,
         book: AddrBook::load(Some(dir.join("peers.txt")), allow_local),
         store,
+        bodies,
         orphans: HashMap::new(),
         orphan_bytes: 0,
         peers: HashMap::new(),

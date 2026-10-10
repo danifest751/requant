@@ -26,12 +26,12 @@ struct FileSource {
 }
 
 #[cfg(unix)]
-fn read_at(f: &File, buf: &mut [u8], at: u64) -> io::Result<()> {
+pub(crate) fn read_at(f: &File, buf: &mut [u8], at: u64) -> io::Result<()> {
     std::os::unix::fs::FileExt::read_exact_at(f, buf, at)
 }
 
 #[cfg(windows)]
-fn read_at(f: &File, mut buf: &mut [u8], mut at: u64) -> io::Result<()> {
+pub(crate) fn read_at(f: &File, mut buf: &mut [u8], mut at: u64) -> io::Result<()> {
     while !buf.is_empty() {
         match std::os::windows::fs::FileExt::seek_read(f, buf, at)? {
             0 => return Err(io::ErrorKind::UnexpectedEof.into()),

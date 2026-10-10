@@ -517,3 +517,46 @@ fn supply_audit_and_utxo_hash() {
     extend(&mut a, &alice, vec![]);
     assert_ne!(a.utxo_audit().2, hash);
 }
+
+/// Bodies kept apart, as a node's block file would.
+struct MapBodies(std::sync::Mutex<std::collections::HashMap<Hash, Block>>);
+
+impl requant_consensus::chain::BodySource for MapBodies {
+    fn load(&self, id: &Hash) -> Option<Block> {
+        self.0.lock().unwrap().get(id).cloned()
+    }
+}
+
+#[test]
+fn old_bodies_leave_memory_and_a_deep_reorg_reads_them_back() {
+    let src = std::sync::Arc::new(MapBodies(Default::default()));
+    let mut chain = Chain::new(Network::regtest(), 1);
+    let mut full = Chain::new(Network::regtest(), 1); // keeps everything in memory, for comparison
+    chain.set_body_source(src.clone(), 5);
+    let (alice, bob) = (addr(&key(1)), addr(&key(2)));
+    let mut ids = vec![chain.tip()];
+    for _ in 0..12 {
+        let tip = chain.tip();
+        let b = block_on(&mut chain, &tip, &alice, vec![]);
+        src.0.lock().unwrap().insert(b.id(&chain.net), b.clone());
+        ids.push(b.id(&chain.net));
+        assert_eq!(full.accept(b.clone(), NOW), Ok(Accepted::NewTip));
+        assert_eq!(chain.accept(b, NOW), Ok(Accepted::NewTip));
+    }
+    // genesis and the last five keep their bodies; older ones come back from the source
+    assert!(chain.bodies_in_memory() <= 6, "{} bodies in memory", chain.bodies_in_memory());
+    assert_eq!(chain.block(&ids[2]).unwrap().header.height, 2);
+    // a branch from height 3 overtakes the tip: nine blocks are disconnected, most of them read back
+    let mut parent = ids[3];
+    let mut last = Accepted::SideChain;
+    for _ in 0..10 {
+        let b = block_on(&mut chain, &parent, &bob, vec![]);
+        parent = b.id(&chain.net);
+        src.0.lock().unwrap().insert(parent, b.clone());
+        full.accept(b.clone(), NOW).unwrap();
+        last = chain.accept(b, NOW).unwrap();
+    }
+    assert_eq!(last, Accepted::Reorg { disconnected: 9 });
+    assert_eq!(chain.tip(), full.tip());
+    assert_eq!(chain.utxo_audit(), full.utxo_audit(), "same UTXO set as a chain holding every body");
+}
