@@ -83,7 +83,7 @@ fn corpus() -> (Chain, Vec<Block>, Vec<Tx>) {
             let op = OutPoint { txid: Block::clone(cb).txs[0].txid(), vout: 0 };
             let v = chain.coin(&op).unwrap().output.value;
             let mut t = Tx::Transfer {
-                inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
+                inputs: vec![Input::new(op)],
                 outputs: vec![Output { value: 1000, pkh: [9; 32] }, Output { value: v - 2000, pkh: a }],
             };
             t.sign(&net.chain_id, &[&alice]);
@@ -106,7 +106,31 @@ fn decoders_never_panic() {
     let (_, blocks, txs) = corpus();
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let block_bytes: Vec<Vec<u8>> = blocks.iter().map(|b| b.encode()).collect();
-    let tx_bytes: Vec<Vec<u8>> = txs.iter().map(|t| t.encode()).collect();
+    let mut tx_bytes: Vec<Vec<u8>> = txs.iter().map(|t| t.encode()).collect();
+    // kind-2 transfers with every unlock, so mutants exercise their decoding and canonical form too
+    use requant_consensus::tx::{Htlc, Unlock};
+    let htlc = Htlc { hash: [1; 32], claim: [2; 32], refund: [3; 32], timeout: 9 };
+    for (k, unlock) in [
+        Unlock::Key,
+        Unlock::Multi2 { pubkey2: [4; 32], sig2: [5; 64] },
+        Unlock::HtlcClaim { htlc, preimage: [6; 32] },
+        Unlock::HtlcRefund { htlc },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let inp = Input {
+            after_height: k as u64 + 1,
+            after_blocks: k as u32,
+            unlock,
+            ..Input::new(OutPoint { txid: [7; 32], vout: 1 })
+        };
+        let tx = Tx::Transfer {
+            inputs: vec![inp, Input::new(OutPoint { txid: [8; 32], vout: 0 })],
+            outputs: vec![Output { value: 5, pkh: [0; 32] }],
+        };
+        tx_bytes.push(tx.encode());
+    }
     for round in 0..20_000 {
         let b = mutate(&mut rng, &block_bytes[round % block_bytes.len()]);
         let _ = Block::decode(&b, &net);

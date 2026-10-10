@@ -43,6 +43,9 @@ pub const TEST_DEV_FUND: [u8; 32] = [
 ];
 
 /// Publicly known regtest fund key (`[0xde; 32]`); for tests only.
+/// Height from which the test network accepts kind-2 transfers (it ran without them before).
+pub const TEST_CONDITIONS_HEIGHT: u64 = 1400;
+
 pub fn regtest_dev_key() -> ed25519_dalek::SigningKey {
     ed25519_dalek::SigningKey::from_bytes(&[0xde; 32])
 }
@@ -67,6 +70,9 @@ pub struct Network {
     pub dev_fund: [u8; 32],
     /// Last height that pays the development fund.
     pub dev_fund_last: u64,
+    /// First height whose blocks may contain kind-2 transfers (spending conditions and time locks,
+    /// CHAIN.md §4.1). 0 on networks that have them from genesis.
+    pub conditions_height: u64,
     /// Cumulative work of a known good chain. Until a node's tip has this much work it is still syncing and
     /// does not apply its reorganisation limit, so a cheap chain served first cannot lock it out of the real
     /// one. Raised at releases; not a consensus rule.
@@ -98,6 +104,7 @@ impl Network {
             maturity,
             dev_fund: dev_fund.0,
             dev_fund_last: dev_fund.1,
+            conditions_height: 0,
             min_chain_work: U256::ZERO,
         }
     }
@@ -108,6 +115,8 @@ impl Network {
         n.genesis_target = U256::low_mask(TEST_GENESIS_TARGET_BITS);
         // chainwork of the test network at height 355 (2026-10-10)
         n.min_chain_work = U256([0x12_2219_6194, 0, 0, 0]);
+        // conditions and time locks came to the running test network at this height (node 0.15.0)
+        n.conditions_height = TEST_CONDITIONS_HEIGHT;
         n
     }
 

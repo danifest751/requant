@@ -158,7 +158,7 @@ fn pay(st: &mut State, f: &mut Faucet, ip: IpAddr, to: Hash) -> Result<Hash, Str
     if total > f.cfg.amount + fee {
         outputs.push(Output { value: total - f.cfg.amount - fee, pkh: f.owner });
     }
-    let inputs = chosen.iter().map(|op| Input { prev: *op, pubkey: [0; 32], sig: [0; 64] }).collect();
+    let inputs = chosen.iter().map(|op| Input::new(*op)).collect();
     let mut tx = Tx::Transfer { inputs, outputs };
     let keys: Vec<&SigningKey> = chosen.iter().map(|_| &f.key).collect();
     tx.sign(&st.chain.net.chain_id, &keys);

@@ -8,7 +8,7 @@
 
 use requant_consensus::chain::Chain;
 use requant_consensus::params::MAX_AMOUNT;
-use requant_consensus::tx::{pkh, Hash, OutPoint, Output, Tx};
+use requant_consensus::tx::{Hash, OutPoint, Output, Tx};
 use requant_consensus::Error;
 use std::collections::{HashMap, HashSet};
 
@@ -124,6 +124,15 @@ impl Mempool {
         v.into_iter().map(|(_, id, fee, size)| (id, fee, size)).collect()
     }
 
+    /// Whether an input's time locks allow it in the next block on the chain's tip.
+    fn unlocked_next(chain: &Chain, i: &requant_consensus::tx::Input) -> bool {
+        let next = chain.height() + 1;
+        if i.after_blocks == 0 {
+            return next >= i.after_height;
+        }
+        chain.coin(&i.prev).is_some_and(|c| i.unlocked_at(next, c.height))
+    }
+
     /// An output spendable by a pool transaction: from the UTXO set (with its maturity) or created by a
     /// pooled transaction. Returns the output and the pooled parent, if any.
     fn coin(&self, chain: &Chain, op: &OutPoint) -> Result<(Output, Option<Hash>), Error> {
@@ -161,6 +170,7 @@ impl Mempool {
         // cheap checks and input lookups first; the signatures (the expensive part) last
         tx.check_shape()?;
         let Tx::Transfer { inputs, outputs } = &tx else { return Err(Error::Invalid("coinbase outside a block")) };
+        requant_consensus::chain::check_activation(&chain.net, &tx, chain.height() + 1)?;
         let mut total_in: u64 = 0;
         let mut parents = Vec::new();
         for i in inputs {
@@ -168,8 +178,13 @@ impl Mempool {
                 return Err(Error::Invalid("conflicts with a pooled transaction"));
             }
             let (out, parent) = self.coin(chain, &i.prev)?;
-            if pkh(&i.pubkey) != out.pkh {
+            if i.owner()? != out.pkh {
                 return Err(Error::Invalid("input key does not match the output"));
+            }
+            // only what the next block could contain: time locks passed (a relative lock counts from a
+            // confirmed coin, so it cannot be met while the coin is still pooled)
+            if !Self::unlocked_next(chain, i) {
+                return Err(Error::Invalid("input time lock not yet passed"));
             }
             total_in =
                 total_in.checked_add(out.value).filter(|&t| t <= MAX_AMOUNT).ok_or(Error::Invalid("input total"))?;
@@ -277,7 +292,11 @@ impl Mempool {
             let stale: Vec<Hash> = self
                 .txs
                 .iter()
-                .filter(|(_, e)| inputs(&e.tx).iter().any(|i| self.coin(chain, &i.prev).is_err()))
+                .filter(|(_, e)| {
+                    // spent or gone, or (after a reorganisation to a lower tip) locked again
+                    inputs(&e.tx).iter().any(|i| self.coin(chain, &i.prev).is_err() || !Self::unlocked_next(chain, i))
+                        || requant_consensus::chain::check_activation(&chain.net, &e.tx, chain.height() + 1).is_err()
+                })
                 .map(|(id, _)| *id)
                 .collect();
             if stale.is_empty() {

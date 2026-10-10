@@ -169,4 +169,7 @@ A CMP 50HX (Turing) does about 3.6 M tickets/s, an RTX 5070 about 5 M, an RTX 30
 ## Known limits of this version
 
 Block-first sync (no headers-first yet), address book in memory and `peers.txt` only; see `ROADMAP.md`.
+Spending conditions and time locks (CHAIN.md §4.1) are active from height 1400; nodes older than 0.15.0
+reject blocks that use them. RPC `conditionaddress` gives the address of a 2-of-2 or HTLC; there is no
+swap or channel software yet ([SWAPS.md](SWAPS.md)).
 Upgrading nodes: `deploy/README.md`.

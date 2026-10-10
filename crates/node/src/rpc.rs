@@ -214,8 +214,26 @@ pub(crate) fn tx_json(st: &crate::node::State, tx: &Tx, height: Option<u64>) -> 
                     st.mempool.get(&i.prev.txid).and_then(|t| t.outputs().get(i.prev.vout as usize).copied())
                 });
                 total_in += out.map(|o| o.value).unwrap_or(0);
-                json!({"txid": hex(&i.prev.txid), "vout": i.prev.vout,
-                       "value": out.map(|o| o.value), "owner": out.map(|o| hex(&o.pkh))})
+                let mut v = json!({"txid": hex(&i.prev.txid), "vout": i.prev.vout,
+                       "value": out.map(|o| o.value), "owner": out.map(|o| hex(&o.pkh))});
+                if !i.is_plain() {
+                    // a kind-2 input: its locks and how it unlocks the coin (CHAIN.md §4.1)
+                    use requant_consensus::tx::Unlock;
+                    let unlock = match &i.unlock {
+                        Unlock::Key => json!({"kind": "key"}),
+                        Unlock::Multi2 { pubkey2, .. } => json!({"kind": "multi2", "pubkey2": hex(pubkey2)}),
+                        Unlock::HtlcClaim { htlc, preimage } => {
+                            json!({"kind": "htlc-claim", "hash": hex(&htlc.hash), "preimage": hex(preimage), "timeout": htlc.timeout})
+                        }
+                        Unlock::HtlcRefund { htlc } => {
+                            json!({"kind": "htlc-refund", "hash": hex(&htlc.hash), "timeout": htlc.timeout})
+                        }
+                    };
+                    v["after_height"] = json!(i.after_height);
+                    v["after_blocks"] = json!(i.after_blocks);
+                    v["unlock"] = unlock;
+                }
+                v
             })
             .collect(),
         Tx::Coinbase { .. } => vec![],
@@ -479,6 +497,26 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "inbound": peers.len() - outbound, "known_addresses": st.book.len(),
                 "uploaded_bytes": st.uploaded(),
             }))
+        }
+        "conditionaddress" => {
+            // the address that locks coins under a condition (CHAIN.md §4.1):
+            // ["multi2", pubkey_a, pubkey_b] or ["htlc", sha256_hash, claim, refund, timeout_height]
+            // (claim and refund: addresses or key hashes)
+            use requant_consensus::tx::{multi2_owner, Htlc};
+            let net = &st.chain.net;
+            let who = |v: &Value| -> Result<Hash, String> {
+                let s = v.as_str().ok_or("expected an address or key hash")?;
+                requant_consensus::address::parse_address(net, s).or_else(|_| hash_param(v))
+            };
+            let owner = match arg(0)?.as_str() {
+                Some("multi2") => multi2_owner(&hash_param(arg(1)?)?, &hash_param(arg(2)?)?),
+                Some("htlc") => {
+                    Htlc { hash: hash_param(arg(1)?)?, claim: who(arg(2)?)?, refund: who(arg(3)?)?, timeout: u64_param(arg(4)?)? }
+                        .owner()
+                }
+                _ => return Err("expected parameter 0: \"multi2\" or \"htlc\"".into()),
+            };
+            Ok(json!({"key_hash": hex(&owner), "address": requant_consensus::address::address(net, &owner)}))
         }
         "validateaddress" => {
             let s = arg(0)?.as_str().ok_or("expected an address")?;

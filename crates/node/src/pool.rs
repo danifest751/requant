@@ -672,7 +672,7 @@ fn payout(st: &mut State, pool: &mut Pool) -> bool {
             break;
         }
         gathered += c.output.value;
-        inputs.push(Input { prev: op, pubkey: [0; 32], sig: [0; 64] });
+        inputs.push(Input::new(op));
     }
     let fee = fee_of(inputs.len(), outputs.len() + 1);
     if gathered < total + fee {

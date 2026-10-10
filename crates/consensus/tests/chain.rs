@@ -51,7 +51,7 @@ fn spend(chain: &Chain, from: &SigningKey, op: OutPoint, to: &Hash, value: u64) 
         outputs.push(Output { value: coin.output.value - value - 1000, pkh: addr(from) });
         // fee 1000
     }
-    let mut tx = Tx::Transfer { inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }], outputs };
+    let mut tx = Tx::Transfer { inputs: vec![Input::new(op)], outputs };
     tx.sign(&chain.net.chain_id, &[from]);
     tx
 }
@@ -194,7 +194,7 @@ fn reorg_to_more_work_and_back_on_invalid() {
     let m3_id = m3.id(&chain.net);
     assert_eq!(chain.accept(m3, NOW), Ok(Accepted::SideChain));
     let mut bad_tx = Tx::Transfer {
-        inputs: vec![Input { prev: OutPoint { txid: [7; 32], vout: 0 }, pubkey: [0; 32], sig: [0; 64] }],
+        inputs: vec![Input::new(OutPoint { txid: [7; 32], vout: 0 })],
         outputs: vec![Output { value: 1, pkh: addr(&bob) }],
     };
     bad_tx.sign(&chain.net.chain_id, &[&bob]);
@@ -259,10 +259,8 @@ fn development_fund_share_and_sunset() {
     let coins = chain.coins_of(&fund);
     assert_eq!(coins.len() as u64, last);
     let (op, coin) = coins[0];
-    let mut tx = Tx::Transfer {
-        inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
-        outputs: vec![Output { value: coin.output.value, pkh: miner }],
-    };
+    let mut tx =
+        Tx::Transfer { inputs: vec![Input::new(op)], outputs: vec![Output { value: coin.output.value, pkh: miner }] };
     tx.sign(&chain.net.chain_id, &[&dev]);
     extend(&mut chain, &miner, vec![tx]);
 }
@@ -459,7 +457,7 @@ fn headers_first() {
 fn chained_pair(chain: &Chain, alice: &SigningKey, bob: &SigningKey, op: OutPoint) -> (Tx, Tx) {
     let a = spend(chain, alice, op, &addr(bob), 50_000);
     let mut b = Tx::Transfer {
-        inputs: vec![Input { prev: OutPoint { txid: a.txid(), vout: 0 }, pubkey: [0; 32], sig: [0; 64] }],
+        inputs: vec![Input::new(OutPoint { txid: a.txid(), vout: 0 })],
         outputs: vec![Output { value: 40_000, pkh: addr(&key(3)) }],
     };
     b.sign(&chain.net.chain_id, &[bob]);
@@ -479,7 +477,7 @@ fn undo_restores_exactly_after_reorg_and_failed_connect() {
     // failed connect: [coinbase, A, B, C with a missing input] must leave the UTXO set untouched
     let (a, b) = chained_pair(&chain, &alice, &bob, op);
     let mut c = Tx::Transfer {
-        inputs: vec![Input { prev: OutPoint { txid: [7; 32], vout: 0 }, pubkey: [0; 32], sig: [0; 64] }],
+        inputs: vec![Input::new(OutPoint { txid: [7; 32], vout: 0 })],
         outputs: vec![Output { value: 1, pkh: addr(&bob) }],
     };
     c.sign(&chain.net.chain_id, &[&bob]);

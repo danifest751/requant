@@ -27,6 +27,7 @@ function is `SPEC.md` (TNet v1), unchanged.
 | genesis target | set at launch | `2^229 - 1` | `pow_limit` |
 | coinbase maturity | 100 | 100 | 2 |
 | development fund (§8) | 6%, heights 1..2^21, key set at launch | same, `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` | 6%, heights 1..8, public test key |
+| conditions and time locks (§4.1) from height | 0 (genesis) | 1400 | 0 |
 
 `chain_id = H("requant/chain", name)`. Regtest exists for tests and local development; its small work
 function makes CPU mining instant. The main network's genesis target is chosen at launch from the
@@ -61,6 +62,45 @@ output   = LE64 value || pkh[32]                    pkh = H("requant/pkh", pubke
   must equal the `pkh` of the output it spends.
 - `version` is 1. A transfer has at least one input and one output, no repeated outpoint, outputs
   of at least 1 atom, and `sum(outputs) <= sum(inputs)`; the difference is the fee.
+
+### 4.1 Spending conditions and time locks
+
+An output pays a 32-byte hash; besides a key's `pkh` it may be the hash of a **condition**, revealed
+only by the input that spends it (so a locked coin looks like any other until then, and locking one
+is an ordinary kind-1 transfer):
+
+```
+multi2 owner = H("requant/multi2", pubkey_a || pubkey_b)                    both keys, in this order
+htlc owner   = H("requant/htlc", hash[32] || claim_pkh[32] || refund_pkh[32] || LE64 timeout)
+```
+
+A transfer whose inputs use a condition or a time lock is **kind 2**; every other transfer is kind 1
+(a kind-2 encoding with no such input is invalid, so each transaction has one encoding):
+
+```
+transfer2 (kind 2): varint n_in || input2* || varint n_out || output*
+input2   = prev_txid[32] || LE32 vout || pubkey[32] || signature[64]
+           || LE64 after_height || LE32 after_blocks || LE8 unlock || unlock data
+unlock 0 key:         (none)                       owner = H("requant/pkh", pubkey)
+unlock 1 multi2:      pubkey2[32] || signature2[64]    owner = multi2(pubkey, pubkey2)
+unlock 2 htlc claim:  htlc[104] || preimage[32]    pkh(pubkey) = claim_pkh, SHA256(preimage) = hash
+unlock 3 htlc refund: htlc[104]                    pkh(pubkey) = refund_pkh, after_height >= timeout
+htlc     = hash[32] || claim_pkh[32] || refund_pkh[32] || LE64 timeout
+```
+
+- The txid omits `signature` and `signature2`; everything else (keys, locks, the HTLC, the preimage)
+  is in it and so under every signature. Both keys of a 2-of-2 sign the same sighash (§4).
+- The preimage is exactly 32 bytes and `hash` its plain SHA-256, as Bitcoin-family `OP_SHA256` and
+  EVM `sha256` contracts check it: a swap cannot be broken by a preimage one chain accepts and the
+  other does not.
+- **Time locks**, checked for the block at height `h` containing the transfer, against the spent
+  coin's height `c`: `h >= after_height` (absolute) and `h - c >= after_blocks` (relative). Zero
+  means no lock. The HTLC refund path's `after_height >= timeout` makes the refund valid only from
+  the timeout; the claim path has no time limit. A pre-signed transfer with a lock cannot enter a
+  block (or a node's pool) early, and a reorganisation to a lower tip removes it from the pool again.
+- Kind-2 transfers are valid from the network's activation height (table in §2); before it, a block
+  containing one is invalid. Fixed templates only: there is no script language. Swap and channel
+  protocols built from these are software ([SWAPS.md](SWAPS.md)).
 
 ## 5. Blocks
 

@@ -106,6 +106,14 @@ fn rpc_formats_methods_long_poll_and_cookie() {
     assert_eq!(va["valid"].as_bool(), Some(true));
     assert_eq!(va["key_hash"].as_str(), Some(hex(&payee).as_str()));
     assert_eq!(call2("validateaddress", json!(["trq1nope"]))["result"]["valid"], false);
+    // condition addresses match the consensus hashes
+    use requant_consensus::tx::{multi2_owner, Htlc};
+    let m = call2("conditionaddress", json!(["multi2", hex(&[1; 32]), hex(&[2; 32])]))["result"].clone();
+    assert_eq!(m["key_hash"].as_str(), Some(hex(&multi2_owner(&[1; 32], &[2; 32])).as_str()));
+    let htlc = Htlc { hash: [3; 32], claim: payee, refund: [4; 32], timeout: 99 };
+    let hc = call2("conditionaddress", json!(["htlc", hex(&[3; 32]), addr, hex(&[4; 32]), 99]))["result"].clone();
+    assert_eq!(hc["key_hash"].as_str(), Some(hex(&htlc.owner()).as_str()));
+    assert_eq!(call2("conditionaddress", json!(["nope"]))["error"]["code"], -32602);
     let block1 = call2("getblock", json!([1]))["result"].clone();
     let cb = call2("gettx", json!([block1["txids"][0]]))["result"].clone();
     let dec = call2("decodetx", json!([cb["hex"]]))["result"].clone();

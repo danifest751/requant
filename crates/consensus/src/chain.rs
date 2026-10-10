@@ -5,7 +5,7 @@ use crate::block::{genesis, Block, Claim, Header, BLOCK_VERSION};
 use crate::codec::{Reader, Writer};
 use crate::params::{tagged, Network, MAX_AMOUNT, MAX_FUTURE_SECS, MTP_WINDOW};
 use crate::pow::{dev_fund_share, next_target, reward};
-use crate::tx::{pkh, Hash, OutPoint, Output, Tx};
+use crate::tx::{Hash, OutPoint, Output, Tx};
 use crate::u256::U256;
 use crate::Error;
 use std::collections::HashMap;
@@ -101,6 +101,29 @@ fn read_coin(r: &mut Reader) -> Result<(OutPoint, Coin), Error> {
     let op = OutPoint { txid: r.arr32()?, vout: r.u32()? };
     let output = Output { value: r.u64()?, pkh: r.arr32()? };
     Ok((op, Coin { output, height: r.u64()?, coinbase: r.u8()? != 0 }))
+}
+
+/// Kind-2 transfers only from the network's activation height (CHAIN.md §4.1).
+pub fn check_activation(net: &Network, tx: &Tx, height: u64) -> Result<(), Error> {
+    if tx.is_v2() && height < net.conditions_height {
+        return Err(Error::Invalid("conditions and time locks are not active at this height"));
+    }
+    Ok(())
+}
+
+/// An input spending `coin` in a block at `height`: it satisfies the output (key or condition), the
+/// coinbase is mature, and its time locks have passed. Signatures are checked separately.
+pub fn check_input(net: &Network, inp: &crate::tx::Input, coin: &Coin, height: u64) -> Result<(), Error> {
+    if inp.owner()? != coin.output.pkh {
+        return Err(Error::Invalid("input key does not match the output"));
+    }
+    if coin.coinbase && height - coin.height < net.maturity {
+        return Err(Error::Invalid("immature coinbase spend"));
+    }
+    if !inp.unlocked_at(height, coin.height) {
+        return Err(Error::Invalid("input time lock not yet passed"));
+    }
+    Ok(())
 }
 
 impl Chain {
@@ -416,15 +439,11 @@ impl Chain {
     pub fn check_spend(&self, tx: &Tx) -> Result<u64, Error> {
         let Tx::Transfer { inputs, outputs } = tx else { return Err(Error::Invalid("coinbase outside a block")) };
         let next = self.height() + 1;
+        check_activation(&self.net, tx, next)?;
         let mut total_in: u64 = 0;
         for inp in inputs {
             let coin = self.utxo.get(&inp.prev).ok_or(Error::Invalid("missing or spent input"))?;
-            if pkh(&inp.pubkey) != coin.output.pkh {
-                return Err(Error::Invalid("input key does not match the output"));
-            }
-            if coin.coinbase && next - coin.height < self.net.maturity {
-                return Err(Error::Invalid("immature coinbase spend"));
-            }
+            check_input(&self.net, inp, coin, next)?;
             total_in = total_in
                 .checked_add(coin.output.value)
                 .filter(|&t| t <= MAX_AMOUNT)
@@ -754,16 +773,12 @@ impl Chain {
             let mut fees: u64 = 0;
             for tx in &block.txs[1..] {
                 let Tx::Transfer { inputs, outputs } = tx else { unreachable!("checked standalone") };
+                check_activation(&self.net, tx, height)?;
                 let mut total_in: u64 = 0;
                 for inp in inputs {
                     let coin = self.utxo.remove(&inp.prev).ok_or(Error::Invalid("missing or spent input"))?;
                     spent.push((inp.prev, coin));
-                    if pkh(&inp.pubkey) != coin.output.pkh {
-                        return Err(Error::Invalid("input key does not match the output"));
-                    }
-                    if coin.coinbase && height - coin.height < self.net.maturity {
-                        return Err(Error::Invalid("immature coinbase spend"));
-                    }
+                    check_input(&self.net, inp, &coin, height)?;
                     total_in = total_in
                         .checked_add(coin.output.value)
                         .filter(|&t| t <= MAX_AMOUNT)

@@ -59,7 +59,10 @@ ticket hashed with SHA-256. A block carries the winning ticket's `(nonce, row, p
 
 Full definition: [`SPEC.md`](SPEC.md). Chain rules (draft): [`CHAIN.md`](CHAIN.md): one-minute blocks, a
 smooth emission of 2^24 RQT with a small tail, no premine, and a 6% development fund for the first four
-years that ends by itself.
+years that ends by itself. Transactions can lock coins under 2-of-2 keys or hash/time-locked contracts
+and carry absolute or relative time locks (CHAIN.md §4.1), the primitives for atomic swaps (Bitcoin
+family, EVM, Monero) and payment channels; the protocols themselves are not built yet
+([`SWAPS.md`](SWAPS.md)).
 
 ## Quick start
 
@@ -90,6 +93,7 @@ for the rest.
 
 ```
 SPEC.md          TNet v1 work function (normative)
+SWAPS.md         swaps and payment channels on the consensus primitives: design, privacy, open work
 crates/tnet/     Rust reference: derivations, verifier (Epoch), CLI (vectors, check, bench)
 crates/consensus/ chain rules of CHAIN.md: transactions, blocks, difficulty, emission, chain state
 crates/node/     requantd: storage, peer-to-peer sync and relay, mempool, JSON-RPC, regtest miner

@@ -87,7 +87,7 @@ fn sync_relay_mine_and_restart() {
     };
     let value = coin["value"].as_u64().unwrap();
     let mut tx = Tx::Transfer {
-        inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
+        inputs: vec![Input::new(op)],
         outputs: vec![
             Output { value: 12_345, pkh: addr(&bob) },
             Output { value: value - 12_345 - 500, pkh: addr(&alice) },
@@ -202,7 +202,7 @@ fn discovery_history_and_unconfirmed_change() {
         };
         let v = coin["value"].as_u64().unwrap();
         let mut tx = Tx::Transfer {
-            inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
+            inputs: vec![Input::new(op)],
             outputs: vec![Output { value, pkh: to }, Output { value: v - value - 300, pkh: addr(&alice) }],
         };
         tx.sign(&net.chain_id, &[&alice]);

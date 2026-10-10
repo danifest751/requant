@@ -39,7 +39,7 @@ pub fn fee_for(inputs: usize, outputs: usize, rate: u64) -> u64 {
 }
 
 fn unsigned(chosen: &[Spendable], outputs: Vec<Output>) -> Tx {
-    let inputs = chosen.iter().map(|c| Input { prev: c.op, pubkey: [0; 32], sig: [0; 64] }).collect();
+    let inputs = chosen.iter().map(|c| Input::new(c.op)).collect();
     Tx::Transfer { inputs, outputs }
 }
 

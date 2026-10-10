@@ -35,10 +35,7 @@ fn funded(n: u64) -> (Chain, Vec<OutPoint>) {
 /// Spend `op` (worth `value`) to ourselves leaving `fee`.
 fn spend(chain: &Chain, op: OutPoint, value: u64, fee: u64) -> Tx {
     let me = pkh(&key().verifying_key().to_bytes());
-    let mut tx = Tx::Transfer {
-        inputs: vec![Input { prev: op, pubkey: [0; 32], sig: [0; 64] }],
-        outputs: vec![Output { value: value - fee, pkh: me }],
-    };
+    let mut tx = Tx::Transfer { inputs: vec![Input::new(op)], outputs: vec![Output { value: value - fee, pkh: me }] };
     tx.sign(&chain.net.chain_id, &[&key()]);
     tx
 }
@@ -90,4 +87,41 @@ fn fee_estimate_follows_the_queue() {
     assert_eq!(pool.rate_for(size), 21);
     assert_eq!(pool.rate_for(2 * size), 11);
     assert_eq!(pool.rate_for(0), 31);
+}
+
+/// One more empty block on the tip.
+fn grow(chain: &mut Chain) {
+    let me = pkh(&key().verifying_key().to_bytes());
+    let (tip, h) = (chain.tip(), chain.height() + 1);
+    let mut b = chain.template_on(&tip, &me, vec![], chain.net.genesis_time + 60 * h);
+    let seed = chain.epoch_seed(&tip, h);
+    let epoch = chain.epoch(&seed);
+    b.claim = mine(&chain.net, &epoch, &b.header, 0, 1000).unwrap();
+    chain.accept(b, u64::MAX / 2).unwrap();
+}
+
+#[test]
+fn time_locked_transactions_wait_outside_the_pool() {
+    let (mut chain, coins) = funded(2);
+    let me = pkh(&key().verifying_key().to_bytes());
+    let value = chain.coin(&coins[0]).unwrap().output.value;
+    let chain_id = chain.net.chain_id;
+    let locked = |inp: Input| {
+        let mut tx = Tx::Transfer { inputs: vec![inp], outputs: vec![Output { value: value - 1000, pkh: me }] };
+        tx.sign(&chain_id, &[&key()]);
+        tx
+    };
+    let not_yet = Err(Error::Invalid("input time lock not yet passed"));
+    // absolute: valid from height next+2
+    let abs = locked(Input { after_height: chain.height() + 3, ..Input::new(coins[0]) });
+    let mut pool = Mempool::default();
+    assert_eq!(pool.add(abs.clone(), &chain), not_yet);
+    grow(&mut chain);
+    assert_eq!(pool.add(abs.clone(), &chain), not_yet);
+    grow(&mut chain);
+    assert!(pool.add(abs, &chain).is_ok());
+    // relative: the coin of block 2 needs 50 blocks above it
+    let rel = locked(Input { after_blocks: 50, ..Input::new(coins[1]) });
+    assert_eq!(pool.add(rel, &chain), not_yet);
+    assert_eq!(pool.len(), 1);
 }

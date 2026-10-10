@@ -53,12 +53,24 @@ test network.
 - [x] Headers-first sync (node 0.3, protocol 3): headers and work claims verified without bodies
       (`crates/consensus/src/headers.rs`), bodies downloaded from several peers in parallel and accepted
       without re-verifying claims; peers on protocol 2 are still synced block by block.
-- [ ] Persistent ban list.
+- [x] Persistent ban list (`bans.txt`).
 - [x] Deep-fork protection: forks more than `--max-reorg` blocks below the tip (default one epoch) are
       refused before their work is checked (node policy; recovery after a longer partition is manual).
 - [x] The current and next epoch's weights are derived on a background thread once their seeds are known.
-- [ ] Keep a UTXO snapshot instead of replaying all blocks on start; transaction index.
+- [x] Start-up snapshot `chainstate.bin` instead of replaying every block (node 0.12.0); transaction index.
+- [x] Spending conditions and time locks in consensus (node 0.15.0, CHAIN.md §4.1): 2-of-2, HTLC with a
+      32-byte SHA-256 preimage, absolute and relative locks; test network from height 1400, main network
+      from genesis. The primitives for swaps and channels, so that they need no hard fork later.
 - [x] RPC token (`--rpc-token-file`; clients send `REQUANT_RPC_TOKEN`).
+
+## 2a. Swaps and channels (software on the §4.1 primitives; [SWAPS.md](SWAPS.md))
+
+- [ ] Pool policy: child-pays-for-parent (or a fee output) so pre-signed refunds can be bumped.
+- [ ] One-way payment channels for MagnetGate (deposit, expiry refund, payment states).
+- [ ] HTLC swaps with Bitcoin-family chains and EVM; maker bot; documented privacy limits.
+- [ ] RQT↔XMR swaps: ed25519 adaptor signatures, MuSig2 key aggregation, cancel/refund/punish
+      transfers; external cryptographic review before real value.
+- [ ] Confirmation-depth policy for swaps, scaled to amount and hashrate.
 
 ## 3. Miner
 
