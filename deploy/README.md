@@ -34,7 +34,7 @@ binary with a newer signed release (see `TESTNET.md`, Updates).
 ## Publish a release (maintainers)
 
 ```sh
-python scripts/release.py 0.7.1 --linux requantd --windows requantd.exe --key ~/key/requant-release.key --publish
+python scripts/release.py 0.7.1 --linux requantd --windows requantd.exe --wallet-linux requant-wallet --wallet-windows requant-wallet.exe --key ~/key/requant-release.key --publish
 curl -s -X POST 127.0.0.1:19334 -d "{\"method\":\"submitrelease\",\"params\":[$(python -c 'import json;print(json.dumps(open("release-0.7.1.txt").read()))'), \"$(cat release-0.7.1.sig)\"]}"
 ```
 

@@ -11,6 +11,32 @@ function (**TNet v1**) is frozen with test vectors and reference implementations
 miner exist; there is no main network and the test coins have no value. See [`ROADMAP.md`](ROADMAP.md).
 Nothing here is a security or investment claim.
 
+## Try the test network
+
+1. **Wallet.** Download `requant-wallet` for Windows or Linux from the
+   [latest release](https://github.com/danifest751/requant/releases/latest) and make a key:
+   `requant-wallet keygen my.key` prints your address (`trq1...`) and key hash.
+2. **Test coins.** The **faucet** at http://193.187.93.29:19380/faucet sends 10 RQT to your address, once a
+   day per address.
+3. **Mine.** The GPU miner is **CPPminer** (NVIDIA, RTX 20xx / Turing or newer): download
+   `cppminer-win64-cuda.zip` or `cppminer-linux-x64-cuda.tar.gz` from the
+   [CPPminer releases](https://github.com/danifest751/CPPminer/releases/latest), check the GPU with
+   `cppminer --algo tnet --selftest`, and mine in the pool:
+
+   ```sh
+   cppminer --algo tnet --rpc 193.187.93.29:19340 --payee <your key hash> --worker rig1
+   ```
+
+   The pool pays PPLNS (1% fee) automatically from 1 RQT, 100 blocks after a block is found; your
+   devices and payouts are on the [pool page](http://193.187.93.29:19380/pool).
+4. **Look around.** Blocks, transactions and any address on the
+   [explorer](http://193.187.93.29:19380/); peers and pending transactions on the
+   [network page](http://193.187.93.29:19380/network).
+5. **Run a node** (optional; the wallet sends payments through one): `requantd` from the same release,
+   `requantd --network test --connect 193.187.93.29:19333`, then `requant-wallet balance my.key` and
+   `requant-wallet send my.key <address> 1.5`. With `--auto-update` it installs new signed releases by
+   itself. Everything else: [`TESTNET.md`](TESTNET.md).
+
 ## How the work function works
 
 Every epoch, eight 8192 x 8192 int8 weight matrices are derived from the chain. For each nonce, an
@@ -41,8 +67,8 @@ cargo test --release -- --ignored            # frozen-parameter vectors (512 MiB
 cargo run --release --bin tnet -- bench      # CPU verification time at the v1 parameters
 ```
 
-GPU miner: **CPPminer** `--algo tnet` — download it from [its releases](https://github.com/danifest751/CPPminer/releases/tag/v0.5-fork.9) (Windows and Linux,
-NVIDIA GPUs from Turing on); it mines in the pool or through a node's `getwork`/`submitwork`. GPU benchmark and parity tool: [`miner/cuda/`](miner/cuda/README.md).
+GPU miner: CPPminer `--algo tnet` (see [Try the test network](#try-the-test-network)); it mines in the pool
+or through a node's `getwork`/`submitwork`. GPU benchmark and parity tool: [`miner/cuda/`](miner/cuda/README.md).
 
 A local regtest node that mines on the CPU (instant blocks, small work function):
 

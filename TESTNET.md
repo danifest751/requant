@@ -6,18 +6,22 @@ chain may be reset when the rules change (a reset changes the genesis time in `c
 | | |
 |---|---|
 | Work function | TNet v1 (`SPEC.md`): `n = 8192, B = 65536, L = 8, w = 256` |
-| Block time | 60 s, ASERT (half-life 2 h), starting target `2^229` |
+| Block time | 60 s, ASERT (half-life 2 h), starting target `2^229 - 1` |
 | P2P port | 19333 |
 | Seed nodes | `193.187.93.29:19333`, `193.32.188.248:19333`, `185.174.40.96:19333` |
 | Explorer | http://193.187.93.29:19380/ |
 | Mining pool | `193.187.93.29:19340` (1% fee, PPLNS, payouts from 1 RQT; stats at http://193.187.93.29:19380/pool) |
+| Faucet | http://193.187.93.29:19380/faucet (10 RQT a day per address) |
+| Node and wallet | `requantd`, `requant-wallet` for Linux and Windows: [releases](https://github.com/danifest751/requant/releases/latest) |
+| GPU miner | CPPminer `--algo tnet`: [releases](https://github.com/danifest751/CPPminer/releases/latest) |
 | Development fund | `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` (6%, `CHAIN.md` §8) |
 
 ## Run a node
 
+With the downloaded binary (or `cargo build --release` and `target/release/requantd`):
+
 ```sh
-cargo build --release
-target/release/requantd --network test --datadir ~/requant-test \
+requantd --network test --datadir ~/requant-test --auto-update \
   --connect 193.187.93.29:19333 --connect 193.32.188.248:19333 --connect 185.174.40.96:19333
 curl -s -X POST 127.0.0.1:19334 -d '{"method":"getinfo","params":[]}'
 ```
@@ -64,7 +68,7 @@ transaction takes at most 600 inputs; with more coins, `send ... all` and `conso
 ## Get the miner
 
 The GPU miner is **CPPminer** (`--algo tnet`, NVIDIA GPUs from Turing / RTX 20xx on), released at
-[danifest751/CPPminer](https://github.com/danifest751/CPPminer/releases/tag/v0.5-fork.9): `cppminer-win64-cuda.zip` for Windows, `cppminer-linux-x64-cuda.tar.gz`
+[danifest751/CPPminer](https://github.com/danifest751/CPPminer/releases/latest): `cppminer-win64-cuda.zip` for Windows, `cppminer-linux-x64-cuda.tar.gz`
 for Linux. Nothing else is needed besides a current NVIDIA driver; check the GPU with
 `cppminer --algo tnet --selftest`. Source and build notes: `docs/tnet.md` in that repository.
 

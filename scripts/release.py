@@ -28,7 +28,9 @@ def main() -> int:
     ap.add_argument("--linux", type=Path, help="requantd for linux-x86_64 (static musl build)")
     ap.add_argument("--windows", type=Path, help="requantd.exe for windows-x86_64")
     ap.add_argument("--key", type=Path, required=True, help="release key file")
-    ap.add_argument("--wallet", default="target/release/requant-wallet", help="requant-wallet binary")
+    ap.add_argument("--wallet", default="target/release/requant-wallet", help="requant-wallet that signs")
+    ap.add_argument("--wallet-linux", type=Path, help="requant-wallet for linux-x86_64, attached for download")
+    ap.add_argument("--wallet-windows", type=Path, help="requant-wallet.exe for windows-x86_64, attached for download")
     ap.add_argument("--out", type=Path, default=Path("."))
     ap.add_argument("--publish", action="store_true", help="create the GitHub release")
     a = ap.parse_args()
@@ -68,7 +70,16 @@ def main() -> int:
             if path.resolve() != dst.resolve():
                 dst.write_bytes(path.read_bytes())
             staged.append(str(dst))
-        notes = f"requantd {v}. Signed release manifest: release-{v}.txt, signature release-{v}.sig."
+        # wallets are downloads only: nodes update requantd from the manifest, never the wallet
+        for path, name in [(a.wallet_linux, "requant-wallet-linux-x86_64"),
+                           (a.wallet_windows, "requant-wallet-windows-x86_64.exe")]:
+            if path:
+                dst = a.out / name
+                if path.resolve() != dst.resolve():
+                    dst.write_bytes(path.read_bytes())
+                staged.append(str(dst))
+        notes = (f"requantd {v} (node) and requant-wallet for Linux and Windows. Signed release manifest for "
+                 f"auto-updating nodes: release-{v}.txt, signature release-{v}.sig. See TESTNET.md.")
         subprocess.run(
             ["gh", "release", "create", f"v{v}", "--repo", REPO, "--title", f"requantd {v}", "--notes", notes,
              *staged, str(manifest), str(sig_file)],
