@@ -71,6 +71,9 @@ test network.
 - [ ] RQT↔XMR swaps: ed25519 adaptor signatures, MuSig2 key aggregation, cancel/refund/punish
       transfers; external cryptographic review before real value.
 - [ ] Confirmation-depth policy for swaps, scaled to amount and hashrate.
+- [ ] MagnetGate payments ([design](https://github.com/danifest751/magnetgate/blob/main/PAYMENTS.md)): a deposit
+      watcher library (per-account addresses, confirmations, crediting each deposit once) and a batch
+      payout service generalised from the pool's payouts; WASM/JNI bindings of the wallet cores.
 
 ## 3. Miner
 
