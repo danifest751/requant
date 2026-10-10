@@ -9,6 +9,7 @@ use crate::rpc::{hex, serve_with, unhex, Handler};
 use ed25519_dalek::SigningKey;
 use requant_consensus::address::{address, format_amount};
 use requant_consensus::block::{Block, Claim};
+use requant_consensus::chain::Chain;
 use requant_consensus::tx::{pkh, Hash, Input, Output, Tx};
 use requant_consensus::u256::U256;
 use serde_json::{json, Value};
@@ -98,7 +99,13 @@ struct Found {
     finder: Hash,
     reward: u64,
     status: &'static str,
+    /// Shares the round took against the shares a block needs on average (1.0 = as expected); unknown for
+    /// blocks found before this was recorded.
+    effort: Option<f64>,
 }
+
+/// A sample of the pool every `SAMPLE_EVERY` seconds: (time, pool tickets/s, network tickets/s, devices).
+type Sample = (u64, f64, f64, u32);
 
 struct Payout {
     txid: Hash,
@@ -140,7 +147,16 @@ pub struct Pool {
     found: Vec<Found>,
     payouts: Vec<Payout>,
     last_payout: u64,
+    /// Shares since the last block the pool found (the current round).
+    round_shares: u64,
+    /// Pool and network rate over the last day, and each address's rate.
+    history: VecDeque<Sample>,
+    miner_history: HashMap<Hash, VecDeque<(u64, f64)>>,
 }
+
+/// Seconds between history samples, and samples kept (a day).
+const SAMPLE_EVERY: u64 = 300;
+const SAMPLES_KEPT: usize = 288;
 
 fn h32(v: &Value) -> Option<Hash> {
     unhex(v.as_str()?).ok()?.try_into().ok()
@@ -170,6 +186,9 @@ impl Pool {
             found: Vec::new(),
             payouts: Vec::new(),
             last_payout: now(),
+            round_shares: 0,
+            history: VecDeque::new(),
+            miner_history: HashMap::new(),
         };
         p.load();
         p
@@ -208,7 +227,10 @@ impl Pool {
             "workers": self.workers.iter().map(|((m, w), s)| json!([hex(m), w, s.shares, s.rejected, s.last])).collect::<Vec<_>>(),
             "immature": self.immature.iter().map(|c| json!({"block": hex(&c.block), "height": c.height,
                 "credits": c.credits.iter().map(|(m, a)| json!([hex(m), a])).collect::<Vec<_>>()})).collect::<Vec<_>>(),
-            "found": self.found.iter().map(|f| json!([f.height, hex(&f.id), f.time, hex(&f.finder), f.reward, f.status])).collect::<Vec<_>>(),
+            "found": self.found.iter().map(|f| json!([f.height, hex(&f.id), f.time, hex(&f.finder), f.reward, f.status, f.effort])).collect::<Vec<_>>(),
+            "round_shares": self.round_shares,
+            "history": self.history.iter().map(|h| json!([h.0, h.1, h.2, h.3])).collect::<Vec<_>>(),
+            "miner_history": self.miner_history.iter().map(|(m, v)| (hex(m), json!(v.iter().map(|(t, r)| json!([t, r])).collect::<Vec<_>>()))).collect::<serde_json::Map<_, _>>(),
             "payouts": self.payouts.iter().map(|p| json!([hex(&p.txid), p.time, p.total, p.outputs, p.status,
                 p.paid.iter().map(|(m, a)| json!([hex(m), a])).collect::<Vec<_>>(),
                 p.tx.as_ref().filter(|_| p.status == "pending").map(|t| hex(&t.encode()))])).collect::<Vec<_>>(),
@@ -270,7 +292,7 @@ impl Pool {
             if let (Some(height), Some(id), Some(time), Some(finder), Some(reward)) =
                 (f[0].as_u64(), h32(&f[1]), f[2].as_u64(), h32(&f[3]), f[4].as_u64())
             {
-                self.found.push(Found { height, id, time, finder, reward, status });
+                self.found.push(Found { height, id, time, finder, reward, status, effort: f[6].as_f64() });
             }
         }
         for p in v["payouts"].as_array().into_iter().flatten() {
@@ -289,6 +311,25 @@ impl Pool {
             }
         }
         self.last_payout = v["last_payout"].as_u64().unwrap_or(self.last_payout);
+        self.round_shares = v["round_shares"].as_u64().unwrap_or(0);
+        for h in v["history"].as_array().into_iter().flatten() {
+            if let (Some(t), Some(p), Some(n)) = (h[0].as_u64(), h[1].as_f64(), h[2].as_f64()) {
+                self.history.push_back((t, p, n, h[3].as_u64().unwrap_or(0) as u32));
+            }
+        }
+        if let Some(m) = v["miner_history"].as_object() {
+            for (k, list) in m {
+                if let Ok(Ok(k)) = unhex(k).map(<[u8; 32]>::try_from) {
+                    let v: VecDeque<(u64, f64)> = list
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|x| Some((x[0].as_u64()?, x[1].as_f64()?)))
+                        .collect();
+                    self.miner_history.insert(k, v);
+                }
+            }
+        }
     }
 
     /// Split a block reward over the last shares (PPLNS): the window is twice the expected shares per block.
@@ -446,6 +487,7 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
             s.shares += 1;
             s.last = t;
         }
+        pool.round_shares += 1;
     });
     let h = tnet::ticket_hash(&piece, &digest, nonce, i, c);
     let is_block = !late && tnet::meets_target(&h, &block.header.target.to_be_bytes());
@@ -462,6 +504,9 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
             with_pool(&mut st, |_, pool| {
                 let credits = pool.credits(reward, work_ratio);
                 pool.immature.push(Credit { block: id, height: b.header.height, credits });
+                // effort: the round's shares against the shares a block needs on average
+                let effort = (work_ratio > 0.0).then(|| pool.round_shares as f64 / work_ratio);
+                pool.round_shares = 0;
                 pool.found.push(Found {
                     height: b.header.height,
                     id,
@@ -469,6 +514,7 @@ fn submitwork(shared: &Shared, p: &[Value]) -> Result<Value, String> {
                     finder: miner,
                     reward,
                     status: "immature",
+                    effort,
                 });
                 pool.save();
             });
@@ -520,6 +566,7 @@ fn maintain(st: &mut State, pool: &mut Pool) {
     pool.refused.retain(|_, until| *until > t);
     pool.invalid.retain(|_, (_, since)| t.saturating_sub(*since) <= INVALID_WINDOW);
     changed |= track_payouts(st, pool);
+    changed |= sample(st, pool, t);
 
     if now().saturating_sub(pool.last_payout) >= pool.cfg.payout_every {
         pool.last_payout = now();
@@ -650,35 +697,83 @@ fn payout(st: &mut State, pool: &mut Pool) -> bool {
     }
 }
 
-/// Statistics for the `poolstats` method and the explorer.
-pub fn stats(st: &State) -> Option<Value> {
-    let pool = st.pool.as_ref()?;
-    let net = &st.chain.net;
-    let t = now();
+/// Rates over the last `RATE_WINDOW` seconds in tickets/s, per address and per device. A device that started
+/// recently is rated over the time it has been sending shares (at least a minute), not the whole window.
+fn rates(pool: &Pool, t: u64) -> (HashMap<Hash, f64>, HashMap<(Hash, String), f64>) {
     let share_work = 2f64.powi(pool.cfg.share_bits as i32);
-    // shares in the last RATE_WINDOW seconds and the earliest of them, per address and per device: a device that
-    // started recently is rated over the time it has been sending shares (at least a minute), not the window
     let mut recent: HashMap<Hash, (u64, u64)> = HashMap::new();
-    let mut recent_w: HashMap<(Hash, &str), (u64, u64)> = HashMap::new();
+    let mut recent_w: HashMap<(Hash, String), (u64, u64)> = HashMap::new();
     for (m, at, w) in pool.window.iter().rev() {
         if t.saturating_sub(*at) > RATE_WINDOW {
             break;
         }
-        for e in [recent.entry(*m).or_insert((0, *at)), recent_w.entry((*m, w.as_str())).or_insert((0, *at))] {
+        for e in [recent.entry(*m).or_insert((0, *at)), recent_w.entry((*m, w.clone())).or_insert((0, *at))] {
             e.0 += 1;
             e.1 = *at;
         }
     }
-    let rate = |e: Option<&(u64, u64)>| match e {
-        Some(&(n, first)) => n as f64 * share_work / t.saturating_sub(first).clamp(60, RATE_WINDOW) as f64,
-        None => 0.0,
-    };
+    let rate = |&(n, first): &(u64, u64)| n as f64 * share_work / t.saturating_sub(first).clamp(60, RATE_WINDOW) as f64;
+    (recent.iter().map(|(k, v)| (*k, rate(v))).collect(), recent_w.iter().map(|(k, v)| (k.clone(), rate(v))).collect())
+}
+
+/// The network's rate from its last `window` blocks (expected tickets over elapsed time), and the expected
+/// tickets for the next block (the difficulty).
+pub fn network_rate(chain: &Chain, window: u64) -> (f64, f64) {
+    let tip_h = chain.height();
+    let block = |h: u64| chain.block(&chain.active_id(h).unwrap()).unwrap();
+    let tip = block(tip_h);
+    let difficulty = u256_f64(&U256::work(&tip.header.target));
+    let from = tip_h.saturating_sub(window);
+    if tip_h == from {
+        return (0.0, difficulty);
+    }
+    let tickets: f64 = (from + 1..=tip_h).map(|h| u256_f64(&U256::work(&block(h).header.target))).sum();
+    let span = tip.header.time.saturating_sub(block(from).header.time).max(1) as f64;
+    (tickets / span, difficulty)
+}
+
+/// A history sample every `SAMPLE_EVERY` seconds: the pool, the network, and every address mining.
+fn sample(st: &State, pool: &mut Pool, t: u64) -> bool {
+    if pool.history.back().is_some_and(|h| t.saturating_sub(h.0) < SAMPLE_EVERY) {
+        return false;
+    }
+    let (per_addr, per_dev) = rates(pool, t);
+    let devices = per_dev.values().filter(|r| **r > 0.0).count() as u32;
+    let (net, _) = network_rate(&st.chain, 60);
+    pool.history.push_back((t, per_addr.values().sum(), net, devices));
+    while pool.history.len() > SAMPLES_KEPT {
+        pool.history.pop_front();
+    }
+    // addresses mining now, and those with a history (a zero shows them stopping)
+    let keys: HashSet<Hash> = per_addr.keys().chain(pool.miner_history.keys()).copied().collect();
+    for m in keys {
+        let h = pool.miner_history.entry(m).or_default();
+        h.push_back((t, per_addr.get(&m).copied().unwrap_or(0.0)));
+        while h.len() > SAMPLES_KEPT {
+            h.pop_front();
+        }
+    }
+    pool.miner_history.retain(|_, h| h.iter().any(|(_, r)| *r > 0.0));
+    true
+}
+
+fn immature_by_miner(pool: &Pool) -> HashMap<Hash, u64> {
     let mut immature: HashMap<Hash, u64> = HashMap::new();
     for c in &pool.immature {
         for (m, a) in &c.credits {
             *immature.entry(*m).or_default() += a;
         }
     }
+    immature
+}
+
+/// Statistics for the `poolstats` method and the explorer.
+pub fn stats(st: &State) -> Option<Value> {
+    let pool = st.pool.as_ref()?;
+    let net = &st.chain.net;
+    let t = now();
+    let (per_addr, per_dev) = rates(pool, t);
+    let immature = immature_by_miner(pool);
     let mut miners: Vec<Value> = pool
         .miners
         .iter()
@@ -691,41 +786,106 @@ pub fn stats(st: &State) -> Option<Value> {
             let mut workers: Vec<Value> = mine
                 .iter()
                 .map(|(w, ws)| {
-                    json!({"name": w, "tickets_per_s": rate(recent_w.get(&(*m, w.as_str()))),
+                    json!({"name": w, "tickets_per_s": per_dev.get(&(*m, (*w).clone())).copied().unwrap_or(0.0),
                            "shares": ws.shares, "rejected": ws.rejected, "last_share": ws.last})
                 })
                 .collect();
             workers.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-            json!({"address": address(net, m), "tickets_per_s": rate(recent.get(m)), "shares": shares,
+            json!({"address": address(net, m), "tickets_per_s": per_addr.get(m).copied().unwrap_or(0.0), "shares": shares,
                    "rejected": rejected, "last_share": last, "balance": pool.balances.get(m).copied().unwrap_or(0),
-                   "immature": immature.get(m).copied().unwrap_or(0), "paid": s.paid, "workers": workers})
+                   "immature": immature.get(m).copied().unwrap_or(0), "paid": s.paid, "workers": workers,
+                   "blocks_found": pool.found.iter().filter(|f| f.finder == *m && f.status != "orphaned").count()})
         })
         .collect();
     miners.sort_by(|a, b| b["tickets_per_s"].as_f64().partial_cmp(&a["tickets_per_s"].as_f64()).unwrap());
-    let total_rate: f64 = miners.iter().map(|m| m["tickets_per_s"].as_f64().unwrap_or(0.0)).sum();
+    let total_rate: f64 = per_addr.values().sum();
+    let (net_rate, difficulty) = network_rate(&st.chain, 60);
+    let tip = st.chain.height();
+    let good: Vec<&Found> = pool.found.iter().filter(|f| f.status != "orphaned").collect();
+    let efforts: Vec<f64> = good.iter().rev().take(100).filter_map(|f| f.effort).collect();
+    let share_work = 2f64.powi(pool.cfg.share_bits as i32);
     Some(json!({
         "address": address(net, &pool.owner),
         "fee_percent": pool.cfg.fee_bp as f64 / 100.0,
         "share_bits": pool.cfg.share_bits,
         "min_payout": format_amount(pool.cfg.min_payout),
         "min_payout_atoms": pool.cfg.min_payout,
-        "blocks_total": pool.found.iter().filter(|f| f.status != "orphaned").count(),
+        "payout_every_s": pool.cfg.payout_every,
+        "blocks_total": good.len(),
+        "blocks_24h": good.iter().filter(|f| t.saturating_sub(f.time) <= 86_400).count(),
+        "last_block_time": good.last().map(|f| f.time),
+        "round_shares": pool.round_shares,
+        "round_effort": if difficulty > 0.0 { pool.round_shares as f64 * share_work / difficulty } else { 0.0 },
+        "effort_avg": if efforts.is_empty() { None } else { Some(efforts.iter().sum::<f64>() / efforts.len() as f64) },
+        "paid_total": pool.payouts.iter().filter(|p| p.status != "returned").map(|p| p.total).sum::<u64>(),
+        "payouts_total": pool.payouts.iter().filter(|p| p.status != "returned").count(),
         "port": pool.cfg.listen.port(),
         "maturity": net.maturity,
         "tickets_per_s": total_rate,
+        "network_tickets_per_s": net_rate,
+        "difficulty": difficulty,
+        "devices": per_dev.values().filter(|r| **r > 0.0).count(),
+        "history": pool.history.iter().map(|h| json!([h.0, h.1, h.2, h.3])).collect::<Vec<_>>(),
         // the network around the pool: addresses and transactions on the best chain
         "network": {
             "addresses_holding": st.chain.holder_count(),
             "addresses_used": st.index.address_count(),
             "transactions": st.index.tx_count(),
-            "transfers": st.index.tx_count().saturating_sub(st.chain.height() as usize + 1),
-            "height": st.chain.height(),
+            "transfers": st.index.tx_count().saturating_sub(tip as usize + 1),
+            "height": tip,
         },
         "miners": miners,
         "blocks": pool.found.iter().rev().take(50).map(|f| json!({"height": f.height, "id": hex(&f.id), "time": f.time,
-            "finder": address(net, &f.finder), "reward": f.reward, "status": f.status})).collect::<Vec<_>>(),
+            "finder": address(net, &f.finder), "reward": f.reward, "status": f.status, "effort": f.effort,
+            "confirmations": (tip + 1).saturating_sub(f.height)})).collect::<Vec<_>>(),
         "payouts": pool.payouts.iter().rev().take(50).map(|p| json!({"txid": hex(&p.txid), "time": p.time,
             "total": p.total, "outputs": p.outputs, "status": p.status})).collect::<Vec<_>>(),
+    }))
+}
+
+/// One address in the pool, for the `minerstats` method and the explorer's miner page: rate and history,
+/// devices, balance, maturing credits, payouts. `known` is false for an address the pool has not seen.
+pub fn miner_stats(st: &State, owner: &Hash) -> Option<Value> {
+    let pool = st.pool.as_ref()?;
+    let net = &st.chain.net;
+    let t = now();
+    let (per_addr, per_dev) = rates(pool, t);
+    let pool_rate: f64 = per_addr.values().sum();
+    let rate = per_addr.get(owner).copied().unwrap_or(0.0);
+    let mut workers: Vec<Value> = pool
+        .workers
+        .iter()
+        .filter(|((m, _), _)| m == owner)
+        .map(|((_, w), ws)| {
+            json!({"name": w, "tickets_per_s": per_dev.get(&(*owner, w.clone())).copied().unwrap_or(0.0),
+                   "shares": ws.shares, "rejected": ws.rejected, "last_share": ws.last})
+        })
+        .collect();
+    workers.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    let payouts: Vec<Value> = pool
+        .payouts
+        .iter()
+        .rev()
+        .filter_map(|p| {
+            let amount: u64 = p.paid.iter().filter(|(m, _)| m == owner).map(|(_, a)| a).sum();
+            (amount > 0).then(|| json!({"txid": hex(&p.txid), "time": p.time, "amount": amount, "status": p.status}))
+        })
+        .take(100)
+        .collect();
+    Some(json!({
+        "address": address(net, owner),
+        "known": pool.miners.contains_key(owner),
+        "tickets_per_s": rate,
+        "share_of_pool": if pool_rate > 0.0 { rate / pool_rate } else { 0.0 },
+        "balance": pool.balances.get(owner).copied().unwrap_or(0),
+        "immature": immature_by_miner(pool).get(owner).copied().unwrap_or(0),
+        "paid": pool.miners.get(owner).map(|s| s.paid).unwrap_or(0),
+        "min_payout_atoms": pool.cfg.min_payout,
+        "payout_every_s": pool.cfg.payout_every,
+        "blocks_found": pool.found.iter().filter(|f| f.finder == *owner && f.status != "orphaned").count(),
+        "workers": workers,
+        "history": pool.miner_history.get(owner).map(|h| h.iter().map(|(t, r)| json!([t, r])).collect::<Vec<_>>()).unwrap_or_default(),
+        "payouts": payouts,
     }))
 }
 
@@ -742,6 +902,15 @@ pub fn serve(shared: Shared, addr: SocketAddr) -> std::io::Result<SocketAddr> {
             )
         }
         "poolstats" => stats(&s2.lock().unwrap()).ok_or_else(|| "pool disabled".to_string()),
+        "minerstats" => {
+            let who = params.first().and_then(|v| v.as_str()).ok_or("address or key hash expected")?;
+            let st = s2.lock().unwrap();
+            let owner = requant_consensus::address::parse_address(&st.chain.net, who)
+                .ok()
+                .or_else(|| h32(&json!(who)))
+                .ok_or("not an address or key hash")?;
+            miner_stats(&st, &owner).ok_or_else(|| "pool disabled".to_string())
+        }
         _ => Err(format!("unknown method {method}")),
     });
     let at = serve_with(addr, None, 64 << 10, 64, handler)?;

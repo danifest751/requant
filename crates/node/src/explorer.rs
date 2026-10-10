@@ -256,6 +256,28 @@ tr.addr td{font-weight:600;border-bottom:none}tr.sub td{font-size:13px;padding-t
 tr.sub td:first-child{padding-left:22px}.tree{color:var(--line);margin-right:8px;font-family:ui-monospace,monospace}tr.addr td .mut{font-weight:400}
 .wrap{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow-x:auto;box-shadow:var(--shadow)}
 .card b{display:block;font-size:20px;font-weight:700}.card span{color:var(--mut);font-size:12px}
+.p-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:4px 0 16px}
+.p-head h1{font-size:28px;margin:0}.p-head .sub{margin:2px 0 0}.crumb{color:var(--mut);font-size:13px}
+.pills{display:flex;gap:6px;flex-wrap:wrap}.pill{font-size:12px;padding:4px 10px;border-radius:999px;background:var(--card);border:1px solid var(--line);color:var(--mut)}.pill b{color:var(--fg)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px;box-shadow:var(--shadow)}
+.kpi .k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.05em}.kpi .v{font-size:24px;font-weight:750;margin-top:4px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.kpi .h{color:var(--mut);font-size:12px;margin-top:3px}.kpi .bar{margin-top:8px}
+.kpi.main{background:linear-gradient(135deg,#0f766e,#4f46e5);color:#fff;border:0}.kpi.main .k,.kpi.main .h{color:rgba(255,255,255,.82)}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:var(--shadow)}
+.panel h3{margin:0 0 10px;font-size:15px}.panel p{margin:0 0 8px;color:var(--mut);font-size:13px}
+.grid2{display:grid;grid-template-columns:1.45fr 1fr;gap:14px;margin-top:14px}@media (max-width:860px){.grid2{grid-template-columns:1fr}}
+.chart svg{width:100%;height:auto;display:block}.chart text{fill:var(--mut);font-size:11px}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--mut);margin-bottom:6px}.legend i{display:inline-block;width:12px;height:3px;border-radius:2px;margin-right:6px;vertical-align:middle}
+.steps{counter-reset:s;list-style:none;padding:0;margin:0}.steps li{counter-increment:s;position:relative;padding:0 0 14px 34px;font-size:14px}
+.steps li:before{content:counter(s);position:absolute;left:0;top:0;width:24px;height:24px;border-radius:50%;background:var(--acc);color:#fff;font-size:13px;font-weight:700;display:grid;place-items:center}
+.dl{display:flex;gap:8px;flex-wrap:wrap;margin-top:6px}.btn{display:inline-block;padding:7px 12px;border-radius:9px;border:1px solid var(--line);background:var(--bg);color:var(--fg);font-size:13px;font-weight:600}
+.btn:hover{text-decoration:none;border-color:var(--acc)}.btn.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+code.cmd2{display:block;user-select:all;background:var(--bg);border:1px solid var(--line);border-radius:9px;padding:9px 11px;font:12.5px ui-monospace,Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:6px}
+.lookup{display:flex;gap:8px;margin-top:8px;flex:none;min-width:0}.lookup input{flex:1}
+.eff{font-weight:700}.eff.good{color:var(--ok)}.eff.mid{color:var(--warn)}.eff.bad{color:var(--bad)}
+.prog{display:flex;align-items:center;gap:8px}.prog .bar{flex:1;min-width:70px}.share{display:flex;align-items:center;gap:8px}.share .bar{width:90px;min-width:90px}
+.note{background:var(--warnbg);color:var(--warn);border-radius:12px;padding:12px 14px;margin:12px 0;font-size:14px}
 "#;
 
 fn page(title: &str, body: &str, refresh: bool) -> String {
@@ -307,6 +329,28 @@ fn route(shared: &Shared, path: &str, host: &str) -> (&'static str, String) {
         },
         ["", "network"] => ("200 OK", network_page(&st)),
         ["", "faucet"] => ("200 OK", faucet_page(&st, None)),
+        ["", "pool", "miner"] => {
+            let q: String = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("addr="))
+                .unwrap_or("")
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(100)
+                .collect();
+            ("302 Found", format!("REDIRECT /pool/miner/{q}"))
+        }
+        ["", "pool", "miner", a] => {
+            let owner = parse_address(net, a).ok().or_else(|| unhex32(a));
+            match (owner, crate::pool::stats(&st)) {
+                (Some(o), Some(s)) => match crate::pool::miner_stats(&st, &o) {
+                    Some(m) => ("200 OK", miner_page(&m, host, s["port"].as_u64().unwrap_or(0))),
+                    None => not_found("Pool (this node runs none)"),
+                },
+                (None, _) => not_found("Address"),
+                (_, None) => not_found("Pool (this node runs none)"),
+            }
+        }
         ["", "pool"] => match crate::pool::stats(&st) {
             Some(s) => ("200 OK", pool_page(&s, host)),
             None => not_found("Pool (this node runs none)"),
@@ -685,82 +729,237 @@ fn badge(status: &str) -> String {
     format!("<span class=\"badge {cls}\">{text}</span>")
 }
 
+/// A line chart of up to two series over time (inline SVG, no scripts): `(label, colour, points)`.
+/// A chart series: label, colour, (time, value) points.
+type Series<'a> = (&'a str, &'a str, Vec<(u64, f64)>);
+
+fn chart(series: &[Series], unit: &str) -> String {
+    let pts: Vec<&(u64, f64)> = series.iter().flat_map(|s| s.2.iter()).collect();
+    if pts.len() < 2 || series.iter().all(|s| s.2.len() < 2) {
+        return "<div class=\"empty\">Collecting data: the chart fills in over the next hours (one point every 5 minutes).</div>"
+            .into();
+    }
+    let (w, h, l, r, t, b) = (720.0, 210.0, 58.0, 10.0, 10.0, 24.0);
+    let t0 = pts.iter().map(|p| p.0).min().unwrap() as f64;
+    let t1 = (pts.iter().map(|p| p.0).max().unwrap() as f64).max(t0 + 1.0);
+    let top = pts.iter().map(|p| p.1).fold(0.0, f64::max).max(1.0) * 1.12;
+    let x = |tt: u64| l + (tt as f64 - t0) / (t1 - t0) * (w - l - r);
+    let y = |v: f64| t + (1.0 - v / top) * (h - t - b);
+    let mut svg = format!("<svg viewBox=\"0 0 {w} {h}\" role=\"img\" aria-label=\"rate over time\">");
+    for k in 0..=4 {
+        let v = top * k as f64 / 4.0;
+        let yy = y(v);
+        svg += &format!(
+            "<line x1=\"{l}\" x2=\"{}\" y1=\"{yy:.1}\" y2=\"{yy:.1}\" style=\"stroke:var(--line)\"/><text x=\"{}\" y=\"{:.1}\" text-anchor=\"end\">{}</text>",
+            w - r,
+            l - 6.0,
+            yy + 4.0,
+            if k == 0 { "0".to_string() } else { format!("{}{unit}", si(v).replace(".00", "")) }
+        );
+    }
+    let ticks = 6;
+    for k in 0..=ticks {
+        let tt = (t0 + (t1 - t0) * k as f64 / ticks as f64) as u64;
+        let hm = &utc(tt)[11..16];
+        svg += &format!("<text x=\"{:.1}\" y=\"{}\" text-anchor=\"middle\">{hm}</text>", x(tt), h - 6.0);
+    }
+    for (i, (_, colour, ps)) in series.iter().enumerate() {
+        if ps.len() < 2 {
+            continue;
+        }
+        let line: String = ps.iter().map(|(tt, v)| format!("{:.1},{:.1} ", x(*tt), y(*v))).collect();
+        if i == 0 {
+            // the first series gets a soft area under it
+            svg += &format!(
+                "<polygon points=\"{:.1},{:.1} {line}{:.1},{:.1}\" style=\"fill:{colour};opacity:.12\"/>",
+                x(ps[0].0),
+                y(0.0),
+                x(ps[ps.len() - 1].0),
+                y(0.0)
+            );
+        }
+        let dash = if i == 0 { "" } else { "stroke-dasharray:5 4;" };
+        svg += &format!("<polyline points=\"{line}\" style=\"fill:none;stroke:{colour};stroke-width:2;{dash}\"/>");
+    }
+    svg += "</svg>";
+    let legend: String = series
+        .iter()
+        .map(|(label, colour, _)| format!("<span><i style=\"background:{colour}\"></i>{label}</span>"))
+        .collect();
+    format!("<div class=\"chart\"><div class=\"legend\">{legend}</div>{svg}</div>")
+}
+
+/// Effort as a percentage, coloured: under 100% the pool was lucky.
+fn effort(e: Option<f64>) -> String {
+    match e {
+        Some(e) => {
+            let class = if e < 1.0 {
+                "good"
+            } else if e < 2.0 {
+                "mid"
+            } else {
+                "bad"
+            };
+            format!("<span class=\"eff {class}\">{:.0}%</span>", e * 100.0)
+        }
+        None => "<span class=\"mut\">—</span>".into(),
+    }
+}
+
+fn kpi(k: &str, v: &str, h: &str, main: bool) -> String {
+    format!(
+        "<div class=\"kpi{}\"><div class=\"k\">{k}</div><div class=\"v\">{v}</div><div class=\"h\">{h}</div></div>",
+        if main { " main" } else { "" }
+    )
+}
+
+fn rqt(atoms: u64) -> String {
+    let s = format_amount(atoms);
+    let t = s.trim_end_matches('0').trim_end_matches('.');
+    if t.is_empty() {
+        "0".into()
+    } else {
+        t.to_string()
+    }
+}
+
 fn pool_page(s: &serde_json::Value, host: &str) -> String {
     let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
     let f = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0);
-    let min_payout = n(&s["min_payout_atoms"]).max(1);
     let endpoint = format!("{host}:{}", n(&s["port"]));
     let miners = s["miners"].as_array().cloned().unwrap_or_default();
-    let devices: usize = miners.iter().map(|m| m["workers"].as_array().map(|w| w.len()).unwrap_or(0)).sum();
-    let blocks = s["blocks"].as_array().cloned().unwrap_or_default();
+    let active: Vec<&serde_json::Value> = miners.iter().filter(|m| f(&m["tickets_per_s"]) > 0.0).collect();
+    let (rate, net) = (f(&s["tickets_per_s"]), f(&s["network_tickets_per_s"]));
+    let share = if net > 0.0 { (rate / net * 100.0).min(100.0) } else { 0.0 };
+    let last =
+        s["last_block_time"].as_u64().map(|t| format!("last {} ago", ago(t))).unwrap_or_else(|| "none yet".into());
     let mut body = format!(
-        "<div class=\"hero\"><div><div class=\"lbl\">Pool rate · last 10 min</div><div class=\"big\">{}tickets/s</div>\
-<div class=\"row\"><div><b>{}</b><span>addresses</span></div><div><b>{}</b><span>devices</span></div>\
-<div><b>{}</b><span>blocks found</span></div><div><b>{} %</b><span>fee</span></div><div><b>{} RQT</b><span>min payout</span></div></div></div>\
-<div class=\"connect\"><p>Connect a GPU (<a style=\"color:#fff;text-decoration:underline\" href=\"https://github.com/danifest751/CPPminer/releases/latest\">download CPPminer</a>, NVIDIA from RTX 20xx; <span style=\"opacity:.8\">--worker names a device</span>):</p>\
-<code class=\"cmd\">cppminer --algo tnet --rpc {endpoint} --payee YOUR_KEY_HASH --worker rig1</code>\
-<p style=\"margin-top:8px;font-size:13px;opacity:.9\">No key hash yet? <code>requant-wallet keygen my.key</code> prints it, or take test coins from the <a style=\"color:#fff;text-decoration:underline\" href=\"/faucet\">faucet</a>.</p>\
-<p style=\"margin-top:10px\">PPLNS over the last shares · 2^{} tickets per share · paid automatically after {} confirmations, every 10 min</p></div></div>",
-        si(f(&s["tickets_per_s"])),
-        miners.len(),
-        devices,
-        n(&s["blocks_total"]),
+        "<div class=\"p-head\"><div><h1>Requant pool</h1><p class=\"sub\">Mine Requant (test network) with an NVIDIA GPU; rewards split by \
+         shares and paid automatically.</p></div><div class=\"pills\"><span class=\"pill\"><b>PPLNS</b></span>\
+         <span class=\"pill\">fee <b>{}%</b></span><span class=\"pill\">min payout <b>{} RQT</b></span>\
+         <span class=\"pill\">payouts every <b>{} min</b></span><span class=\"pill\">maturity <b>{} blocks</b></span>\
+         <span class=\"pill\">share <b>2^{} tickets</b></span></div></div>",
         s["fee_percent"],
-        format_amount(n(&s["min_payout_atoms"])).trim_end_matches('0').trim_end_matches('.'),
-        s["share_bits"],
+        rqt(n(&s["min_payout_atoms"])),
+        n(&s["payout_every_s"]).max(60) / 60,
         n(&s["maturity"]),
+        s["share_bits"],
     );
-    let nw = &s["network"];
-    let cards = [
-        (
-            format!("{}", n(&nw["addresses_holding"])),
-            format!("addresses holding coins ({} ever used)", n(&nw["addresses_used"])),
-        ),
-        (
-            format!("{}", n(&nw["transactions"])),
-            format!("transactions on the chain ({} transfers)", n(&nw["transfers"])),
-        ),
-        (format!("{}", n(&nw["height"])), "block height".to_string()),
-    ];
-    body += "<h2>Network</h2><div class=\"cards\">";
-    for (v, l) in cards {
-        body += &format!("<div class=\"card\"><div class=\"k\">{l}</div><div class=\"v\">{v}</div></div>");
-    }
+    body += "<div class=\"kpis\">";
+    body += &kpi("Pool rate", &format!("{}tickets/s", si(rate)), &format!("{share:.1}% of the network"), true);
+    body += &kpi(
+        "Network rate",
+        &format!("{}tickets/s", si(net)),
+        &format!("difficulty {}tickets / block", si(f(&s["difficulty"]))),
+        false,
+    );
+    body += &kpi(
+        "Miners",
+        &format!("{}", active.len()),
+        &format!("{} devices online · {} addresses known", n(&s["devices"]), miners.len()),
+        false,
+    );
+    body += &kpi(
+        "Blocks found",
+        &format!("{} <span style=\"font-size:14px;font-weight:500\">in 24 h</span>", n(&s["blocks_24h"])),
+        &format!("{} in total · {last}", n(&s["blocks_total"])),
+        false,
+    );
+    body += &kpi(
+        "Round effort",
+        &format!("{:.0}%", f(&s["round_effort"]) * 100.0),
+        &match s["effort_avg"].as_f64() {
+            Some(a) => format!("average {:.0}% over recent blocks", a * 100.0),
+            None => "of a block's expected shares".into(),
+        },
+        false,
+    );
+    body += &kpi(
+        "Paid out",
+        &format!("{} RQT", rqt(n(&s["paid_total"]))),
+        &format!("{} payouts", n(&s["payouts_total"])),
+        false,
+    );
     body += "</div>";
-    body += "<h2>Miners</h2><div class=\"tbl\"><table><thead><tr><th>Address · devices</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th>\
-<th class=\"r\">Maturing</th><th class=\"r\">Balance</th><th>To payout</th><th class=\"r\">Paid</th></tr></thead><tbody>";
+
+    // the day's rates, and how to start
+    let hist = s["history"].as_array().cloned().unwrap_or_default();
+    let series = |k: usize| hist.iter().filter_map(|h| Some((h[0].as_u64()?, h[k].as_f64()?))).collect::<Vec<_>>();
+    body += &format!(
+        "<div class=\"grid2\"><div class=\"panel\"><h3>Rate, last 24 hours</h3>{}</div>",
+        chart(&[("pool", "var(--acc)", series(1)), ("network", "var(--acc2)", series(2))], "")
+    );
+    body += &format!(
+        "<div class=\"panel\"><h3>Start mining</h3><ol class=\"steps\">\
+         <li><b>Get a wallet address.</b> <code>requant-wallet keygen my.key</code> prints your address and key hash \
+         (<a href=\"https://github.com/danifest751/requant/releases/latest\">wallet download</a>).</li>\
+         <li><b>Download CPPminer</b> (NVIDIA, RTX 20xx or newer):<div class=\"dl\">\
+         <a class=\"btn pri\" href=\"https://github.com/danifest751/CPPminer/releases/latest\">Windows</a>\
+         <a class=\"btn\" href=\"https://github.com/danifest751/CPPminer/releases/latest\">Linux</a></div></li>\
+         <li><b>Run it</b> with your key hash; <code>--worker</code> names the device:\
+         <code class=\"cmd2\">cppminer --algo tnet --rpc {endpoint} --payee YOUR_KEY_HASH --worker rig1</code></li>\
+         </ol><h3 style=\"margin-top:4px\">Your statistics</h3>\
+         <form class=\"lookup\" action=\"/pool/miner\"><input name=\"addr\" placeholder=\"Your address trq1... or key hash\" aria-label=\"Address\">\
+         <button class=\"btn pri\">Show</button></form>\
+         <p style=\"margin-top:10px\">No coins to try a transfer? The <a href=\"/faucet\">faucet</a> sends 10 RQT a day.</p></div></div>"
+    );
+
+    // network figures
+    let nw = &s["network"];
+    body += "<div class=\"kpis\" style=\"margin-top:14px\">";
+    body += &kpi(
+        "Addresses with coins",
+        &format!("{}", n(&nw["addresses_holding"])),
+        &format!("{} ever used", n(&nw["addresses_used"])),
+        false,
+    );
+    body += &kpi(
+        "Transactions",
+        &format!("{}", n(&nw["transactions"])),
+        &format!("{} transfers", n(&nw["transfers"])),
+        false,
+    );
+    body += &kpi("Block height", &format!("{}", n(&nw["height"])), "test network", false);
+    body += "</div>";
+
+    // miners
+    let min_payout = n(&s["min_payout_atoms"]).max(1);
+    body += "<h2>Miners</h2><div class=\"tbl\"><table><thead><tr><th>Address · devices</th><th class=\"r\">Rate</th><th>Share of pool</th>\
+<th class=\"r\">Maturing</th><th class=\"r\">Balance</th><th>To payout</th><th class=\"r\">Paid</th><th class=\"r\">Blocks</th></tr></thead><tbody>";
     if miners.is_empty() {
-        body += "<tr><td colspan=\"7\" class=\"empty\">No miners yet — connect one with the command above.</td></tr>";
+        body += "<tr><td colspan=\"8\" class=\"empty\">No miners yet: start one with the steps above.</td></tr>";
     }
     for m in &miners {
         let a = m["address"].as_str().unwrap_or("");
         let bal = n(&m["balance"]);
         let pct = (bal as f64 / min_payout as f64 * 100.0).min(100.0);
+        let mr = f(&m["tickets_per_s"]);
+        let sh = if rate > 0.0 { mr / rate * 100.0 } else { 0.0 };
         let devices = m["workers"].as_array().cloned().unwrap_or_default();
-        // the address row carries the totals; each device follows as its own row, in the same columns
         body += &format!(
-            "<tr class=\"addr\"><td><a class=\"mono\" href=\"/address/{a}\">{}</a> <span class=\"mut\">· {} device{}</span></td>\
-<td class=\"r\">{}tickets/s</td><td class=\"r\">{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td>\
-<td><div class=\"bar\" title=\"{pct:.0}% of the minimum payout\"><span style=\"width:{pct:.0}%\"></span></div></td><td class=\"r\">{}</td></tr>",
+            "<tr class=\"addr\"><td><a class=\"mono\" href=\"/pool/miner/{a}\">{}</a> <span class=\"mut\">· {} device{}</span></td>\
+<td class=\"r\">{}tickets/s</td><td><div class=\"share\"><div class=\"bar\"><span style=\"width:{sh:.0}%\"></span></div><span class=\"mut\">{sh:.1}%</span></div></td>\
+<td class=\"r\">{}</td><td class=\"r\">{}</td><td><div class=\"bar\" title=\"{pct:.0}% of the minimum payout\"><span style=\"width:{pct:.0}%\"></span></div></td>\
+<td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
             short(a),
             devices.len(),
             if devices.len() == 1 { "" } else { "s" },
-            si(f(&m["tickets_per_s"])),
-            n(&m["shares"]),
-            format_amount(n(&m["immature"])),
-            format_amount(bal),
-            format_amount(n(&m["paid"])),
+            si(mr),
+            rqt(n(&m["immature"])),
+            rqt(bal),
+            rqt(n(&m["paid"])),
+            n(&m["blocks_found"]),
         );
         for (k, w) in devices.iter().enumerate() {
-            let active = now().saturating_sub(n(&w["last_share"])) < 600;
+            let on = now().saturating_sub(n(&w["last_share"])) < 600;
             let rejected = n(&w["rejected"]);
             body += &format!(
                 "<tr class=\"sub{}\"><td><span class=\"tree\">{}</span><span class=\"dot {}\"></span>{}</td><td class=\"r\">{}tickets/s</td>\
-<td class=\"r\">{}</td><td colspan=\"4\" class=\"mut\">{}{}</td></tr>",
+<td colspan=\"6\" class=\"mut\">{} shares · {}{}</td></tr>",
                 if k + 1 == devices.len() { " last" } else { "" },
                 if k + 1 == devices.len() { "└" } else { "├" },
-                if active { "on-dot" } else { "off-dot" },
-                w["name"].as_str().unwrap_or(""),
+                if on { "on-dot" } else { "off-dot" },
+                esc(w["name"].as_str().unwrap_or("")),
                 si(f(&w["tickets_per_s"])),
                 n(&w["shares"]),
                 if n(&w["last_share"]) > 0 { format!("last share {} ago", ago(n(&w["last_share"]))) } else { "no shares yet".into() },
@@ -768,34 +967,146 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
             );
         }
     }
-    body += "</tbody></table></div><h2>Blocks found by the pool</h2><div class=\"tbl\"><table><thead><tr><th>Height</th><th>Found</th><th>Status</th><th class=\"r\">Reward (RQT)</th></tr></thead><tbody>";
+
+    // blocks
+    let maturity = n(&s["maturity"]).max(1);
+    body += "</tbody></table></div><h2>Blocks found by the pool</h2><div class=\"tbl\"><table><thead><tr><th>Height</th><th>Found</th>\
+<th class=\"r\">Effort</th><th>Status</th><th class=\"r\">Reward (RQT)</th></tr></thead><tbody>";
+    let blocks = s["blocks"].as_array().cloned().unwrap_or_default();
     if blocks.is_empty() {
-        body += "<tr><td colspan=\"4\" class=\"empty\">No blocks yet.</td></tr>";
+        body += "<tr><td colspan=\"5\" class=\"empty\">No blocks yet.</td></tr>";
     }
-    for b in blocks.iter().take(20) {
+    for b in blocks.iter().take(25) {
+        let status = b["status"].as_str().unwrap_or("");
+        let conf = n(&b["confirmations"]).min(maturity);
+        let state = if status == "immature" {
+            let pct = conf as f64 / maturity as f64 * 100.0;
+            format!(
+                "<div class=\"prog\"><div class=\"bar\"><span style=\"width:{pct:.0}%\"></span></div><span class=\"mut\">{conf}/{maturity}</span></div>"
+            )
+        } else {
+            badge(status)
+        };
         body += &format!(
-            "<tr><td><a href=\"/block/{0}\">{0}</a></td><td>{1} <span class=\"mut\">· {2} ago</span></td><td>{3}</td><td class=\"r\">{4}</td></tr>",
+            "<tr><td><a href=\"/block/{0}\">{0}</a></td><td>{1} <span class=\"mut\">· {2} ago</span></td><td class=\"r\">{3}</td><td>{4}</td><td class=\"r\">{5}</td></tr>",
             n(&b["height"]),
             utc(n(&b["time"])),
             ago(n(&b["time"])),
-            badge(b["status"].as_str().unwrap_or("")),
-            format_amount(n(&b["reward"]))
+            effort(b["effort"].as_f64()),
+            state,
+            rqt(n(&b["reward"]))
         );
     }
-    body += "</tbody></table></div><h2>Payouts</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th>Time (UTC)</th><th>Status</th><th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr></thead><tbody>";
+
+    // payouts
+    body += "</tbody></table></div><h2>Payouts</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th>Time (UTC)</th><th>Status</th>\
+<th class=\"r\">Miners</th><th class=\"r\">Total (RQT)</th></tr></thead><tbody>";
     let payouts = s["payouts"].as_array().cloned().unwrap_or_default();
     if payouts.is_empty() {
         body += "<tr><td colspan=\"5\" class=\"empty\">No payouts yet: balances are paid once they reach the minimum and the blocks have matured.</td></tr>";
     }
+    for p in payouts.iter().take(25) {
+        let t = p["txid"].as_str().unwrap_or("");
+        body += &format!(
+            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{} <span class=\"mut\">· {} ago</span></td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
+            short(t),
+            utc(n(&p["time"])),
+            ago(n(&p["time"])),
+            badge(p["status"].as_str().unwrap_or("confirmed")),
+            n(&p["outputs"]),
+            rqt(n(&p["total"]))
+        );
+    }
+    body += "</tbody></table></div>";
+    page("Mining pool", &body, true)
+}
+
+/// One miner: rate and its history, devices, balance, maturing credits, payouts.
+fn miner_page(m: &serde_json::Value, host: &str, port: u64) -> String {
+    let n = |v: &serde_json::Value| v.as_u64().unwrap_or(0);
+    let f = |v: &serde_json::Value| v.as_f64().unwrap_or(0.0);
+    let a = m["address"].as_str().unwrap_or("");
+    let mut body = format!(
+        "<div class=\"p-head\"><div><div class=\"crumb\"><a href=\"/pool\">Pool</a> / miner</div><h1>Miner</h1>\
+         <p class=\"sub mono\">{a} · <a href=\"/address/{a}\">on the explorer</a></p></div></div>"
+    );
+    if m["known"] != true {
+        body += &format!(
+            "<div class=\"note\">This address has not mined in the pool yet. Start the miner with its key hash:\
+             <code class=\"cmd2\">cppminer --algo tnet --rpc {host}:{port} --payee KEY_HASH_OF_THIS_ADDRESS --worker rig1</code></div>"
+        );
+    }
+    let min_payout = n(&m["min_payout_atoms"]).max(1);
+    let bal = n(&m["balance"]);
+    let pct = (bal as f64 / min_payout as f64 * 100.0).min(100.0);
+    let workers = m["workers"].as_array().cloned().unwrap_or_default();
+    let online = workers.iter().filter(|w| now().saturating_sub(n(&w["last_share"])) < 600).count();
+    body += "<div class=\"kpis\">";
+    body += &kpi(
+        "Rate",
+        &format!("{}tickets/s", si(f(&m["tickets_per_s"]))),
+        &format!("{:.1}% of the pool", f(&m["share_of_pool"]) * 100.0),
+        true,
+    );
+    body += &format!(
+        "<div class=\"kpi\"><div class=\"k\">Balance</div><div class=\"v\">{} RQT</div><div class=\"bar\"><span style=\"width:{pct:.0}%\"></span></div>\
+         <div class=\"h\">{pct:.0}% of the {} RQT minimum; paid every {} min</div></div>",
+        rqt(bal),
+        rqt(min_payout),
+        n(&m["payout_every_s"]).max(60) / 60
+    );
+    body += &kpi("Maturing", &format!("{} RQT", rqt(n(&m["immature"]))), "credited once its blocks mature", false);
+    body += &kpi(
+        "Paid",
+        &format!("{} RQT", rqt(n(&m["paid"]))),
+        &format!("{} payouts", m["payouts"].as_array().map(|p| p.len()).unwrap_or(0)),
+        false,
+    );
+    body += &kpi(
+        "Devices",
+        &format!("{online} online"),
+        &format!("{} known · {} blocks found", workers.len(), n(&m["blocks_found"])),
+        false,
+    );
+    body += "</div>";
+    let hist: Vec<(u64, f64)> =
+        m["history"].as_array().into_iter().flatten().filter_map(|h| Some((h[0].as_u64()?, h[1].as_f64()?))).collect();
+    body += &format!(
+        "<div class=\"panel\" style=\"margin-top:14px\"><h3>Rate, last 24 hours</h3>{}</div>",
+        chart(&[("this address", "var(--acc)", hist)], "")
+    );
+    body += "<h2>Devices</h2><div class=\"tbl\"><table><thead><tr><th>Device</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th>\
+<th class=\"r\">Rejected</th><th>Last share</th></tr></thead><tbody>";
+    if workers.is_empty() {
+        body += "<tr><td colspan=\"5\" class=\"empty\">No devices in the last hour.</td></tr>";
+    }
+    for w in &workers {
+        let on = now().saturating_sub(n(&w["last_share"])) < 600;
+        let (sh, rj) = (n(&w["shares"]), n(&w["rejected"]));
+        let rj_pct = if sh + rj > 0 { rj as f64 / (sh + rj) as f64 * 100.0 } else { 0.0 };
+        body += &format!(
+            "<tr><td><span class=\"dot {}\"></span>{}</td><td class=\"r\">{}tickets/s</td><td class=\"r\">{sh}</td><td class=\"r\">{rj} <span class=\"mut\">({rj_pct:.1}%)</span></td><td class=\"mut\">{}</td></tr>",
+            if on { "on-dot" } else { "off-dot" },
+            esc(w["name"].as_str().unwrap_or("")),
+            si(f(&w["tickets_per_s"])),
+            if n(&w["last_share"]) > 0 { format!("{} ago", ago(n(&w["last_share"]))) } else { "never".into() }
+        );
+    }
+    body += "</tbody></table></div><h2>Payouts to this address</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th>Time (UTC)</th>\
+<th>Status</th><th class=\"r\">Amount (RQT)</th></tr></thead><tbody>";
+    let payouts = m["payouts"].as_array().cloned().unwrap_or_default();
+    if payouts.is_empty() {
+        body += "<tr><td colspan=\"4\" class=\"empty\">No payouts yet.</td></tr>";
+    }
     for p in &payouts {
         let t = p["txid"].as_str().unwrap_or("");
         body += &format!(
-            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{}</td><td>{}</td><td class=\"r\">{}</td><td class=\"r\">{}</td></tr>",
+            "<tr><td class=\"mono\"><a href=\"/tx/{t}\">{}</a></td><td>{} <span class=\"mut\">· {} ago</span></td><td>{}</td><td class=\"r\">{}</td></tr>",
             short(t),
             utc(n(&p["time"])),
+            ago(n(&p["time"])),
             badge(p["status"].as_str().unwrap_or("confirmed")),
-            n(&p["outputs"]),
-            format_amount(n(&p["total"]))
+            rqt(n(&p["amount"]))
         );
     }
     body += "</tbody></table></div>";
