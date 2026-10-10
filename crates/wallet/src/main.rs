@@ -21,8 +21,10 @@
 //! send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]...; consolidate WALLET|KEYFILE.
 //!
 //! Options: --network test|regtest (default test, or the wallet's), --rpc HOST:PORT, --fee-rate
-//! ATOMS_PER_BYTE (default 5), --yes (send without asking), --out FILE.
-//! Environment (for scripts): REQUANT_WALLET_PASSPHRASE, REQUANT_WALLET_PHRASE (for restore).
+//! ATOMS_PER_BYTE|fast|normal|slow (default normal: the node's `estimatefee` for 3 blocks), --yes (send
+//! without asking), --out FILE, --rpc-cookie FILE (the node's `.cookie`, when it runs with `--rpc-cookie`).
+//! Environment (for scripts): REQUANT_WALLET_PASSPHRASE, REQUANT_WALLET_PHRASE (for restore),
+//! REQUANT_RPC_TOKEN, REQUANT_RPC_COOKIE.
 
 use ed25519_dalek::SigningKey;
 use requant_consensus::params::Network;
@@ -285,12 +287,14 @@ fn main() {
     let net_opt = opt("--network");
     let rpc_opt = opt("--rpc");
     let out = opt("--out");
+    if let Some(c) = opt("--rpc-cookie") {
+        // the RPC client reads the cookie file named here (see `requant_node::rpc::request`)
+        std::env::set_var("REQUANT_RPC_COOKIE", c);
+    }
     if opt("--fee").is_some() {
         die("--fee is replaced by --fee-rate ATOMS_PER_BYTE (the fee now follows the transaction's size)");
     }
-    let rate = opt("--fee-rate")
-        .map(|f| f.parse::<u64>().unwrap_or_else(|_| die("bad --fee-rate")))
-        .unwrap_or(DEFAULT_FEE_RATE);
+    let fee_opt = opt("--fee-rate").unwrap_or_else(|| "normal".into());
     // the network: as given, else the wallet file's (second argument), else the test network
     let wallet_net = args.get(1).filter(|p| std::path::Path::new(p.as_str()).is_file()).and_then(|p| {
         let t = std::fs::read_to_string(p).ok()?;
@@ -305,6 +309,24 @@ fn main() {
     let default_rpc = if net.name == "test" { "127.0.0.1:19334" } else { "127.0.0.1:19445" };
     let rpc_s = rpc_opt.unwrap_or_else(|| default_rpc.into());
     let rpc = || rpc_s.to_socket_addrs().ok().and_then(|mut a| a.next()).unwrap_or_else(|| die("bad --rpc address"));
+    // the fee rate: a number of atoms per byte, or fast / normal / slow from the node's estimate (the next
+    // 1, 3 or 10 blocks' worth of its pool), falling back to the default with a node that has no estimate
+    let rate = || -> u64 {
+        let blocks = match fee_opt.as_str() {
+            "fast" => 1,
+            "normal" => 3,
+            "slow" => 10,
+            n => return n.parse().unwrap_or_else(|_| die("bad --fee-rate: a number, fast, normal or slow")),
+        };
+        match request(rpc(), "estimatefee", json!([blocks])) {
+            Ok(v) => {
+                let r = v["feerate"].as_u64().unwrap_or(DEFAULT_FEE_RATE);
+                eprintln!("fee rate {r} atoms/byte ({fee_opt}: the next {blocks} block(s))");
+                r
+            }
+            Err(_) => DEFAULT_FEE_RATE,
+        }
+    };
     let write_out = |text: &str, what: &str| match &out {
         Some(p) => {
             write_file(p, text);
@@ -416,7 +438,7 @@ fn main() {
             let spendable: Vec<Spendable> =
                 all_coins(addr, &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
             let pairs: Vec<(&str, &str)> = rest.chunks(2).map(|p| (p[0], p[1])).collect();
-            let (tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate, || next_change(&mut w, None));
+            let (tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate(), || next_change(&mut w, None));
             // the transactions that created the coins spent, so the signer can check their values
             let mut prev: Vec<Tx> = Vec::new();
             for c in &chosen {
@@ -619,7 +641,7 @@ fn main() {
                     let me = owner_of(&key);
                     let spendable: Vec<Spendable> =
                         coins(rpc(), &me).into_iter().filter(|c| c.1).map(|c| c.0).collect();
-                    let (mut tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate, || me);
+                    let (mut tx, chosen, lines, fee) = plan(&net, spendable, &pairs, rate(), || me);
                     show_payment(&net, &lines, fee, transfer_size(chosen.len(), lines.len()) as usize);
                     confirm("send?", yes);
                     let keys = HashMap::from([(me, key)]);
@@ -631,7 +653,7 @@ fn main() {
                     let spendable: Vec<Spendable> =
                         all_coins(rpc(), &w.owners()).into_iter().filter(|c| c.1).map(|c| c.0).collect();
                     let (mut tx, chosen, lines, fee) =
-                        plan(&net, spendable, &pairs, rate, || next_change(&mut w, Some(&seed)));
+                        plan(&net, spendable, &pairs, rate(), || next_change(&mut w, Some(&seed)));
                     show_payment(&net, &lines, fee, transfer_size(chosen.len(), lines.len()) as usize);
                     confirm("send?", yes);
                     sign_with(&net, &mut tx, &chosen, &w.keyring(&seed)).unwrap_or_else(|e| die(&e));
@@ -664,7 +686,7 @@ fn main() {
             // the smallest first: those are what make payments large
             spendable.sort_by_key(|c| c.value);
             let n = spendable.len().min(MAX_INPUTS);
-            let (mut tx, chosen, kept, fee) = plan_sweep(&spendable, &to, rate).unwrap_or_else(|e| die(&e));
+            let (mut tx, chosen, kept, fee) = plan_sweep(&spendable, &to, rate()).unwrap_or_else(|e| die(&e));
             eprintln!(
                 "  merge {n} of {} coins into one of {} RQT, fee {} RQT",
                 spendable.len(),
@@ -686,7 +708,7 @@ fn main() {
             "       | balance SRC | history SRC [N] | coins SRC | tx TXID   (SRC: an address, a key file or a wallet)\n",
             "       | send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]... | consolidate WALLET|KEYFILE\n",
             "options: --network test|regtest (default test, or the wallet's) --rpc HOST:PORT\n",
-            "         --fee-rate ATOMS_PER_BYTE (default 5) --yes --out FILE"
+            "         --fee-rate ATOMS_PER_BYTE|fast|normal|slow (default normal: the node's estimate) --yes --out FILE"
         )),
     }
 }

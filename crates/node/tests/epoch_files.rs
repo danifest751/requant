@@ -18,6 +18,7 @@ fn node(dir: &Path, connect: Vec<String>, mine: bool) -> Handle {
         listen: "127.0.0.1:0".parse().unwrap(),
         rpc: None,
         rpc_token: None,
+        rpc_cookie: false,
         connect,
         mine_to: mine.then(|| pkh(&miner.verifying_key().to_bytes())),
         mine_interval: Duration::from_millis(200),

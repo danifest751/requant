@@ -18,6 +18,7 @@ fn main() {
     let (mut connect, mut mine_to, mut interval, mut threads) = (Vec::new(), None, 1000u64, 4usize);
     let mut max_reorg = None::<u64>;
     let (mut rpc_token, mut discover, mut auto_update) = (None::<String>, true, false);
+    let mut rpc_cookie = false;
     let mut notify = requant_node::watch::NotifyConfig::default();
     let mut max_upload = None::<u64>;
     let mut explorer = None;
@@ -109,6 +110,11 @@ fn main() {
                 let t = std::fs::read_to_string(&f).unwrap_or_else(|e| usage(&format!("{f}: {e}")));
                 rpc_token = Some(t.trim().to_string());
             }
+            "--rpc-cookie" => {
+                rpc_cookie = true;
+                k += 1;
+                continue;
+            }
             "--no-discover" => {
                 discover = false;
                 k += 1;
@@ -143,6 +149,7 @@ fn main() {
         threads,
         max_reorg,
         rpc_token,
+        rpc_cookie,
         peer_interval: Duration::from_secs(15),
         discover,
         explorer,
@@ -219,7 +226,7 @@ fn usage(msg: &str) -> ! {
     eprintln!(
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
          \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
-\n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--auto-update] [--version]
+\n                         [--rpc-token-file FILE] [--rpc-cookie] [--no-discover] [--explorer ADDR] [--auto-update] [--version]
                          [--faucet-key FILE [--faucet-amount RQT] [--faucet-daily RQT]] [--notify-url URL] [--notify-telegram TOKEN:CHAT] [--max-upload 50G]"
     );
     std::process::exit(2)

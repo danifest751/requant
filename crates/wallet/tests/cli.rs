@@ -29,6 +29,7 @@ fn node(data: &Path, mine_to: [u8; 32]) -> Handle {
         threads: 1,
         max_reorg: 100,
         rpc_token: None,
+        rpc_cookie: false,
         peer_interval: Duration::from_millis(200),
         discover: false,
         explorer: None,

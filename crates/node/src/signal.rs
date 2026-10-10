@@ -13,6 +13,11 @@ pub fn requested() -> bool {
     REQUESTED.load(Ordering::SeqCst)
 }
 
+/// Ask the process to stop as if a signal came (the `stop` RPC).
+pub fn request() {
+    REQUESTED.store(true, Ordering::SeqCst);
+}
+
 /// The state is saved; the process may end (lets a waiting Windows handler return).
 pub fn done() {
     DONE.store(true, Ordering::SeqCst);

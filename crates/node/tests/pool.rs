@@ -69,6 +69,7 @@ fn pool_shares_blocks_and_payouts() {
         listen: "127.0.0.1:0".parse().unwrap(),
         rpc: Some("127.0.0.1:0".parse().unwrap()),
         rpc_token: None,
+        rpc_cookie: false,
         connect: vec![],
         mine_to: None,
         mine_interval: Duration::from_millis(0),

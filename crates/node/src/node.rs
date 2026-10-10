@@ -51,6 +51,9 @@ const BAN_SECS: u64 = 3600;
 static UPLOADED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 const UPLOAD_PERIOD: u64 = 30 * 86_400;
 
+/// Bytes of transactions a block template takes from the pool (the rest of a block's 1 MiB is headroom).
+pub const TEMPLATE_TX_BYTES: usize = 900_000;
+
 /// Best-chain blocks whose bodies stay in memory; older ones are read back from `blocks.dat` when needed.
 pub const KEEP_BODIES: u64 = 2000;
 
@@ -102,6 +105,9 @@ pub struct Config {
     pub rpc: Option<SocketAddr>,
     /// If set, RPC requests must carry `Authorization: Bearer <token>`.
     pub rpc_token: Option<String>,
+    /// Write a random RPC token to `<datadir>/<network>/.cookie` at start and require it (with
+    /// `rpc_token`, either one is accepted); the file is removed at shutdown.
+    pub rpc_cookie: bool,
     pub connect: Vec<String>,
     /// Mine on the CPU, paying this key hash (practical on regtest only).
     pub mine_to: Option<Hash>,
@@ -200,7 +206,7 @@ pub struct State {
     /// Work handed out by `getwork`, by header digest.
     templates: Vec<(Hash, Block)>,
     pub node_id: u64,
-    listen_port: u16,
+    pub listen_port: u16,
     bans: HashMap<IpAddr, u64>,
     bans_path: PathBuf,
     /// Where epoch weights files live (see `epochs`).
@@ -238,6 +244,18 @@ pub struct Handle {
     /// The pool's public JSON-RPC address, if a pool runs.
     pub pool: Option<SocketAddr>,
     pub stop: Arc<AtomicBool>,
+    /// The RPC cookie file, removed at shutdown.
+    pub cookie: Option<PathBuf>,
+}
+
+/// Write a file only the owner can read (the RPC cookie).
+fn write_private(path: &std::path::Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(path)?.write_all(text.as_bytes())
 }
 
 impl State {
@@ -585,7 +603,7 @@ impl State {
 
     /// A block template for `payee` with pooled transactions, remembered for `submit_work`.
     pub fn new_work(&mut self, payee: &Hash) -> (Block, Hash) {
-        let (txs, fees) = self.mempool.select(900_000);
+        let (txs, fees) = self.mempool.select(TEMPLATE_TX_BYTES);
         let net = &self.chain.net;
         let time = if net.name == "regtest" {
             // on-schedule timestamps keep the regtest difficulty constant however fast blocks come
@@ -1133,8 +1151,17 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         let (interval, discover) = (cfg.peer_interval, cfg.discover);
         std::thread::spawn(move || connection_manager(shared, configured, interval, discover, stop));
     }
+    let cookie = cfg.rpc_cookie.then(|| dir.join(".cookie"));
     let rpc = match cfg.rpc {
-        Some(a) => Some(crate::rpc::serve(shared.clone(), a, cfg.rpc_token.clone())?),
+        Some(a) => {
+            let mut tokens: Vec<String> = cfg.rpc_token.iter().cloned().collect();
+            if let Some(p) = &cookie {
+                let t: String = (0..4).map(|_| format!("{:016x}", random_u64())).collect();
+                write_private(p, &t)?;
+                tokens.push(t);
+            }
+            Some(crate::rpc::serve(shared.clone(), a, tokens)?)
+        }
         None => None,
     };
     let pool = match &cfg.pool {
@@ -1165,7 +1192,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         let (shared, stop, interval) = (shared.clone(), stop.clone(), cfg.mine_interval);
         std::thread::spawn(move || cpu_miner(shared, payee, stop, interval));
     }
-    Ok(Handle { shared, p2p, rpc, pool, stop })
+    Ok(Handle { shared, p2p, rpc, pool, stop, cookie })
 }
 
 /// Keep `--connect` peers connected, fill outbound slots from the address book, ping peers, save the book.
@@ -1279,6 +1306,9 @@ impl Handle {
     pub fn shutdown(&self) {
         self.stop.store(true, Ordering::Relaxed);
         persist(&self.shared);
+        if let Some(c) = &self.cookie {
+            let _ = std::fs::remove_file(c);
+        }
     }
 }
 

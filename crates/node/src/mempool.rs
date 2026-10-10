@@ -97,6 +97,26 @@ impl Mempool {
         (self.seq, self.txs.len())
     }
 
+    /// The fee rate (atoms per byte) that puts a new transaction within the first `bytes` of the pool in
+    /// selection order (highest rate first): one above the rate at that point, or the minimum when the pool
+    /// holds less.
+    pub fn rate_for(&self, bytes: usize) -> u64 {
+        let mut v: Vec<&Entry> = self.txs.values().collect();
+        v.sort_by(|a, b| (b.fee as u128 * a.size as u128).cmp(&(a.fee as u128 * b.size as u128)));
+        let mut used = 0usize;
+        for e in v {
+            used += e.size;
+            if used > bytes {
+                return (e.fee / e.size.max(1) as u64 + 1).max(MIN_FEE_RATE);
+            }
+        }
+        MIN_FEE_RATE
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
+    }
+
     /// Pooled transactions, newest first: (txid, fee, size in bytes).
     pub fn list(&self) -> Vec<(Hash, u64, usize)> {
         let mut v: Vec<_> = self.txs.iter().map(|(id, e)| (e.seq, *id, e.fee, e.size)).collect();

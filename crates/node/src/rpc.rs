@@ -1,6 +1,15 @@
-//! JSON-RPC over HTTP: `POST /` with `{"method": ..., "params": [...]}`, answered by
-//! `{"result": ..., "error": null}`. Bind it to localhost; with a token configured, requests must carry
-//! `Authorization: Bearer <token>` (clients here read it from `REQUANT_RPC_TOKEN`).
+//! JSON-RPC over HTTP: `POST /` with a request object or a batch (an array of up to `MAX_BATCH`).
+//!
+//! A JSON-RPC 2.0 request (`"jsonrpc": "2.0"`) gets a 2.0 answer: `{"jsonrpc", "id", "result"}` or
+//! `{"jsonrpc", "id", "error": {"code", "message"}}` with the standard codes (-32700 parse error, -32600
+//! invalid request, -32601 unknown method, -32602 invalid parameters, -32000 for the node's own errors);
+//! one without an `id` is a notification and gets no answer. A request without `"jsonrpc"` (the older form
+//! used by miners and tools) is answered as before: `{"result": ..., "error": null | "message", "id"}`.
+//! Parameters are positional.
+//!
+//! Bind it to localhost. With tokens configured (`--rpc-token-file`, `--rpc-cookie`), requests must carry
+//! `Authorization: Bearer <token>`; clients here read it from `REQUANT_RPC_TOKEN` or the cookie file named
+//! by `REQUANT_RPC_COOKIE`.
 
 use crate::node::{agent, now, Shared, VERSION};
 use requant_consensus::block::Claim;
@@ -12,6 +21,10 @@ use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::Arc;
 
 const MAX_BODY: usize = 4 << 20;
+/// Requests in one batch.
+const MAX_BATCH: usize = 100;
+/// How long a `getwork` long poll waits for a new block.
+const LONG_POLL: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
@@ -32,19 +45,19 @@ fn u64_param(v: &Value) -> Result<u64, String> {
     v.as_u64().ok_or_else(|| "expected an integer".to_string())
 }
 
-pub fn serve(shared: Shared, addr: SocketAddr, token: Option<String>) -> io::Result<SocketAddr> {
+pub fn serve(shared: Shared, addr: SocketAddr, tokens: Vec<String>) -> io::Result<SocketAddr> {
     let handler: Handler = Arc::new(move |method: &str, params: &[Value]| call(&shared, method, params));
-    serve_with(addr, token, MAX_BODY, usize::MAX, handler)
+    serve_with(addr, tokens, MAX_BODY, usize::MAX, handler)
 }
 
 /// A JSON-RPC method dispatcher.
 pub type Handler = Arc<dyn Fn(&str, &[Value]) -> Result<Value, String> + Send + Sync>;
 
 /// Serve JSON-RPC over HTTP with `handler`, at most `max_active` requests at once and `max_body` bytes
-/// per request; with a token, requests must carry it.
+/// per request; with tokens, requests must carry one of them.
 pub fn serve_with(
     addr: SocketAddr,
-    token: Option<String>,
+    tokens: Vec<String>,
     max_body: usize,
     max_active: usize,
     handler: Handler,
@@ -58,9 +71,9 @@ pub fn serve_with(
                 active.fetch_sub(1, SeqCst);
                 continue;
             }
-            let (token, handler, active) = (token.clone(), handler.clone(), active.clone());
+            let (tokens, handler, active) = (tokens.clone(), handler.clone(), active.clone());
             std::thread::spawn(move || {
-                let _ = handle(s, token, max_body, &handler);
+                let _ = handle(s, &tokens, max_body, &handler);
                 active.fetch_sub(1, SeqCst);
             });
         }
@@ -82,7 +95,53 @@ fn same(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-fn handle(stream: TcpStream, token: Option<String>, max_body: usize, handler: &Handler) -> io::Result<()> {
+/// The JSON-RPC 2.0 error code of a handler's error message.
+fn code(e: &str) -> i64 {
+    if e.starts_with("unknown method") {
+        -32601
+    } else if e.starts_with("missing parameter") || e.starts_with("expected") || e.contains("parameter") {
+        -32602
+    } else {
+        -32000
+    }
+}
+
+fn error2(id: Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+/// Answer one request object; `None` for a notification.
+fn one(req: &Value, handler: &Handler) -> Option<Value> {
+    let v2 = req.get("jsonrpc").and_then(Value::as_str) == Some("2.0");
+    let id = req.get("id").cloned();
+    let Some(method) = req.get("method").and_then(Value::as_str) else {
+        return Some(if v2 {
+            error2(id.unwrap_or(Value::Null), -32600, "invalid request: no method")
+        } else {
+            json!({"result": null, "error": "invalid request: no method", "id": id})
+        });
+    };
+    let empty = vec![];
+    let params = match req.get("params") {
+        None | Some(Value::Null) => Ok(&empty),
+        Some(Value::Array(a)) => Ok(a),
+        Some(_) => Err("parameters must be an array (positional)"),
+    };
+    let r = params.map_err(str::to_string).and_then(|p| handler(method, p));
+    if !v2 {
+        return Some(match r {
+            Ok(r) => json!({"result": r, "error": null, "id": id}),
+            Err(e) => json!({"result": null, "error": e, "id": id}),
+        });
+    }
+    let id = id?;
+    Some(match r {
+        Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
+        Err(e) => error2(id, code(&e), &e),
+    })
+}
+
+fn handle(stream: TcpStream, tokens: &[String], max_body: usize, handler: &Handler) -> io::Result<()> {
     stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
     CLIENT.with(|c| c.set(stream.peer_addr().ok().map(|a| a.ip())));
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -105,42 +164,121 @@ fn handle(stream: TcpStream, token: Option<String>, max_body: usize, handler: &H
             auth = l["authorization:".len()..].trim().strip_prefix("Bearer ").map(|s| s.trim().to_string());
         }
     }
-    if let Some(t) = &token {
-        if !auth.as_deref().is_some_and(|a| same(a, t)) {
-            return respond(stream, &json!({"result": null, "error": "unauthorized"}));
-        }
+    if !tokens.is_empty() && !auth.as_deref().is_some_and(|a| tokens.iter().any(|t| same(a, t))) {
+        // HTTP 401, with a body either kind of client reads
+        let body = json!({"jsonrpc": "2.0", "id": null, "result": null, "error": "unauthorized"});
+        return respond(stream, "401 Unauthorized", Some(&body));
     }
     if len > max_body {
-        return respond(stream, &json!({"result": null, "error": "request too large"}));
+        return respond(stream, "413 Payload Too Large", Some(&json!({"result": null, "error": "request too large"})));
     }
     let mut body = vec![0u8; len];
     reader.read_exact(&mut body)?;
     let reply = match serde_json::from_slice::<Value>(&body) {
-        Ok(req) => {
-            let method = req["method"].as_str().unwrap_or("");
-            let empty = vec![];
-            let params = req["params"].as_array().unwrap_or(&empty);
-            match handler(method, params) {
-                Ok(r) => json!({"result": r, "error": null}),
-                Err(e) => json!({"result": null, "error": e}),
+        Ok(Value::Array(reqs)) => {
+            if reqs.is_empty() || reqs.len() > MAX_BATCH {
+                Some(error2(Value::Null, -32600, &format!("a batch holds 1 to {MAX_BATCH} requests")))
+            } else {
+                let answers: Vec<Value> = reqs.iter().filter_map(|r| one(r, handler)).collect();
+                (!answers.is_empty()).then_some(Value::Array(answers))
             }
         }
-        Err(_) => json!({"result": null, "error": "invalid JSON"}),
+        Ok(req) => one(&req, handler),
+        Err(_) => Some(json!({"result": null, "error": "invalid JSON", "jsonrpc": "2.0", "id": null})),
     };
-    respond(stream, &reply)
+    match reply {
+        Some(v) => respond(stream, "200 OK", Some(&v)),
+        None => respond(stream, "204 No Content", None),
+    }
 }
 
-fn respond(mut stream: TcpStream, v: &Value) -> io::Result<()> {
-    let body = v.to_string();
+fn respond(mut stream: TcpStream, status: &str, v: Option<&Value>) -> io::Result<()> {
+    let body = v.map(|v| v.to_string()).unwrap_or_default();
     write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )
 }
 
+/// A transaction as RPC shows it: inputs with the values and owners of the coins they spend (from the
+/// index or the pool), outputs, fee, and where it is (`height`: `None` while pooled or not yet sent).
+fn tx_json(st: &crate::node::State, tx: &Tx, height: Option<u64>) -> Value {
+    let tip = st.chain.height();
+    let mut total_in = 0u64;
+    let inputs: Vec<Value> = match tx {
+        Tx::Transfer { inputs, .. } => inputs
+            .iter()
+            .map(|i| {
+                let out = st.index.output(&i.prev).or_else(|| {
+                    st.mempool.get(&i.prev.txid).and_then(|t| t.outputs().get(i.prev.vout as usize).copied())
+                });
+                total_in += out.map(|o| o.value).unwrap_or(0);
+                json!({"txid": hex(&i.prev.txid), "vout": i.prev.vout,
+                       "value": out.map(|o| o.value), "owner": out.map(|o| hex(&o.pkh))})
+            })
+            .collect(),
+        Tx::Coinbase { .. } => vec![],
+    };
+    let outputs: Vec<Value> = tx.outputs().iter().map(|o| json!({"value": o.value, "owner": hex(&o.pkh)})).collect();
+    let total_out: u64 = tx.outputs().iter().map(|o| o.value).sum();
+    let size = tx.encode().len();
+    json!({
+        "txid": hex(&tx.txid()), "coinbase": tx.is_coinbase(), "height": height,
+        "confirmations": height.map(|h| tip - h + 1).unwrap_or(0),
+        "inputs": inputs, "outputs": outputs, "size": size,
+        "fee": if tx.is_coinbase() { 0 } else { total_in.saturating_sub(total_out) },
+        "hex": hex(&tx.encode()),
+    })
+}
+
+/// Spendable coins of `owner`: confirmed unspent outputs (minus those spent by pooled transactions) and
+/// unconfirmed outputs of pooled transactions; both are spendable by a new transaction.
+fn utxos_of(st: &crate::node::State, owner: &Hash) -> Vec<Value> {
+    let next = st.chain.height() + 1;
+    let maturity = st.chain.net.maturity;
+    let mut v: Vec<Value> = st
+        .chain
+        .coins_of(owner)
+        .into_iter()
+        .filter(|(op, _)| !st.mempool.is_spent(op))
+        .map(|(op, c)| {
+            json!({
+                "txid": hex(&op.txid), "vout": op.vout, "value": c.output.value, "height": c.height,
+                "coinbase": c.coinbase, "confirmed": true,
+                "spendable": !c.coinbase || next - c.height >= maturity,
+            })
+        })
+        .collect();
+    for (op, o) in st.mempool.pending_outputs(owner) {
+        v.push(json!({"txid": hex(&op.txid), "vout": op.vout, "value": o.value, "height": null,
+                      "coinbase": false, "confirmed": false, "spendable": true}));
+    }
+    v
+}
+
+/// A block id from a height or a hex id.
+fn block_param(st: &crate::node::State, v: &Value) -> Result<Hash, String> {
+    match v.as_u64() {
+        Some(h) => st.chain.active_id(h).ok_or_else(|| "no block at that height".to_string()),
+        None => {
+            let id = hash_param(v)?;
+            st.chain.header(&id).map(|_| id).ok_or_else(|| "unknown block".to_string())
+        }
+    }
+}
+
 fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
     let arg = |k: usize| p.get(k).ok_or_else(|| format!("missing parameter {k}"));
+    // long poll: `getwork payee <longpollid>` waits (without the lock) until the tip is no longer that block
+    if method == "getwork" {
+        if let Some(lp) = p.get(1).and_then(Value::as_str) {
+            let since = std::time::Instant::now();
+            while hex(&shared.lock().unwrap().chain.tip()) == lp && since.elapsed() < LONG_POLL {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
     let mut st = shared.lock().unwrap();
     match method {
         "getinfo" => {
@@ -203,14 +341,113 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             Ok(json!({"version": version, "new": new}))
         }
         "getblock" => {
-            let h = u64_param(arg(0)?)?;
-            let id = st.chain.active_id(h).ok_or("no block at that height")?;
-            let b = st.chain.block(&id).unwrap();
+            let id = block_param(&st, arg(0)?)?;
+            let b = st.chain.block(&id).ok_or("block body not stored")?;
+            let h = b.header.height;
             let txids: Vec<String> = b.txs.iter().map(|t| hex(&t.txid())).collect();
             Ok(
                 json!({"id": hex(&id), "height": h, "time": b.header.time, "target": hex(&b.header.target.to_be_bytes()),
+                      "prev": hex(&b.header.prev), "best_chain": st.chain.active_id(h) == Some(id),
                       "txs": b.txs.len(), "txids": txids, "hex": hex(&b.encode())}),
             )
+        }
+        "getblockhash" => {
+            let h = u64_param(arg(0)?)?;
+            st.chain.active_id(h).map(|id| json!(hex(&id))).ok_or_else(|| "no block at that height".into())
+        }
+        "getblockheader" => {
+            let id = block_param(&st, arg(0)?)?;
+            let hd = st.chain.header(&id).unwrap();
+            let on_best = st.chain.active_id(hd.height) == Some(id);
+            let next = if on_best { st.chain.active_id(hd.height + 1).map(|n| hex(&n)) } else { None };
+            Ok(json!({
+                "id": hex(&id), "height": hd.height, "time": hd.time, "prev": hex(&hd.prev), "next": next,
+                "target": hex(&hd.target.to_be_bytes()), "best_chain": on_best,
+                "confirmations": if on_best { st.chain.height() - hd.height + 1 } else { 0 },
+                "header": hex(&hd.encode()),
+            }))
+        }
+        "getchaintips" => Ok(json!(st
+            .chain
+            .tips()
+            .into_iter()
+            .map(|(id, h, status, branch)| json!({"id": hex(&id), "height": h, "status": status, "branch_length": branch}))
+            .collect::<Vec<_>>())),
+        "getrawmempool" => {
+            let verbose = p.first().and_then(Value::as_bool).unwrap_or(false);
+            Ok(json!(st
+                .mempool
+                .list()
+                .into_iter()
+                .map(|(id, fee, size)| {
+                    if verbose {
+                        json!({"txid": hex(&id), "fee": fee, "size": size, "feerate": fee / size.max(1) as u64})
+                    } else {
+                        json!(hex(&id))
+                    }
+                })
+                .collect::<Vec<_>>()))
+        }
+        "getmempoolinfo" => Ok(json!({
+            "size": st.mempool.len(), "bytes": st.mempool.bytes(), "max_bytes": st.mempool.max_bytes(),
+            "min_feerate": crate::mempool::MIN_FEE_RATE, "max_tx_bytes": crate::mempool::MAX_TX_BYTES,
+        })),
+        "estimatefee" => {
+            // the rate that keeps a new transaction within the next `blocks` blocks' worth of the pool
+            let blocks = p.first().map(u64_param).transpose()?.unwrap_or(3);
+            if !(1..=100).contains(&blocks) {
+                return Err("expected 1 to 100 blocks".into());
+            }
+            let ahead = crate::node::TEMPLATE_TX_BYTES * blocks as usize;
+            Ok(json!({
+                "feerate": st.mempool.rate_for(ahead), "blocks": blocks, "pool_bytes": st.mempool.bytes(),
+                "min_feerate": crate::mempool::MIN_FEE_RATE,
+            }))
+        }
+        "getnetworkinfo" => {
+            let peers = st.peers();
+            let outbound = peers.iter().filter(|p| p.outbound).count();
+            Ok(json!({
+                "agent": agent(), "version": VERSION, "protocol": crate::msg::PROTOCOL,
+                "min_protocol": crate::msg::MIN_PROTOCOL, "network": st.chain.net.name,
+                "listen_port": st.listen_port, "peers": peers.len(), "outbound": outbound,
+                "inbound": peers.len() - outbound, "known_addresses": st.book.len(),
+                "uploaded_bytes": st.uploaded(),
+            }))
+        }
+        "validateaddress" => {
+            let s = arg(0)?.as_str().ok_or("expected an address")?;
+            let net = &st.chain.net;
+            Ok(match requant_consensus::address::parse_address(net, s) {
+                Ok(o) => json!({"valid": true, "address": requant_consensus::address::address(net, &o), "key_hash": hex(&o)}),
+                Err(e) => json!({"valid": false, "error": e}),
+            })
+        }
+        "decodetx" => {
+            let tx = Tx::decode_exact(&unhex(arg(0)?.as_str().ok_or("expected hex")?)?).map_err(|e| e.to_string())?;
+            let height = st.index.locate(&tx.txid()).map(|l| l.height);
+            Ok(tx_json(&st, &tx, height))
+        }
+        "getbalance" => {
+            let owner = hash_param(arg(0)?)?;
+            let (mut confirmed, mut unconfirmed, mut immature) = (0u64, 0u64, 0u64);
+            for c in utxos_of(&st, &owner) {
+                let v = c["value"].as_u64().unwrap_or(0);
+                match (c["spendable"] == true, c["confirmed"] == true) {
+                    (false, _) => immature += v,
+                    (true, false) => unconfirmed += v,
+                    (true, true) => confirmed += v,
+                }
+            }
+            Ok(json!({"confirmed": confirmed, "unconfirmed": unconfirmed, "immature": immature}))
+        }
+        "stop" => {
+            // only from this machine: a remote client must not be able to stop the node
+            if !client_ip().is_some_and(|ip| ip.is_loopback()) {
+                return Err("stop is only accepted from localhost".into());
+            }
+            crate::signal::request();
+            Ok(json!("stopping"))
         }
         "gettx" => {
             let txid = hash_param(arg(0)?)?;
@@ -218,32 +455,7 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 Some(loc) => (st.chain.block(&loc.block).unwrap().txs[loc.pos as usize].clone(), Some(loc.height)),
                 None => (st.mempool.get(&txid).cloned().ok_or("unknown transaction")?, None),
             };
-            let tip = st.chain.height();
-            let mut total_in = 0u64;
-            let inputs: Vec<Value> = match &tx {
-                Tx::Transfer { inputs, .. } => inputs
-                    .iter()
-                    .map(|i| {
-                        let out = st.index.output(&i.prev).or_else(|| {
-                            st.mempool.get(&i.prev.txid).and_then(|t| t.outputs().get(i.prev.vout as usize).copied())
-                        });
-                        total_in += out.map(|o| o.value).unwrap_or(0);
-                        json!({"txid": hex(&i.prev.txid), "vout": i.prev.vout,
-                               "value": out.map(|o| o.value), "owner": out.map(|o| hex(&o.pkh))})
-                    })
-                    .collect(),
-                Tx::Coinbase { .. } => vec![],
-            };
-            let outputs: Vec<Value> =
-                tx.outputs().iter().map(|o| json!({"value": o.value, "owner": hex(&o.pkh)})).collect();
-            let total_out: u64 = tx.outputs().iter().map(|o| o.value).sum();
-            Ok(json!({
-                "txid": hex(&txid), "coinbase": tx.is_coinbase(), "height": height,
-                "confirmations": height.map(|h| tip - h + 1).unwrap_or(0),
-                "inputs": inputs, "outputs": outputs,
-                "fee": if tx.is_coinbase() { 0 } else { total_in.saturating_sub(total_out) },
-                "hex": hex(&tx.encode()),
-            }))
+            Ok(tx_json(&st, &tx, height))
         }
         "history" => {
             let owner = hash_param(arg(0)?)?;
@@ -272,6 +484,8 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             let net = &st.chain.net;
             Ok(json!({
                 "height": b.header.height,
+                // pass it back as the second parameter to wait for the next block (long poll)
+                "longpollid": hex(&b.header.prev),
                 "header": hex(&b.header.encode()),
                 "header_digest": hex(&b.header.digest(&net.chain_id)),
                 "epoch_seed": hex(&seed),
@@ -297,29 +511,8 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             st.process_tx(tx, None).map(|id| json!(hex(&id))).map_err(|e| e.to_string())
         }
         "utxos" => {
-            // Confirmed unspent outputs (minus those spent by pooled transactions) and unconfirmed outputs
-            // of pooled transactions; both are spendable by a new transaction.
             let owner = hash_param(arg(0)?)?;
-            let next = st.chain.height() + 1;
-            let maturity = st.chain.net.maturity;
-            let mut v: Vec<Value> = st
-                .chain
-                .coins_of(&owner)
-                .into_iter()
-                .filter(|(op, _)| !st.mempool.is_spent(op))
-                .map(|(op, c)| {
-                    json!({
-                        "txid": hex(&op.txid), "vout": op.vout, "value": c.output.value, "height": c.height,
-                        "coinbase": c.coinbase, "confirmed": true,
-                        "spendable": !c.coinbase || next - c.height >= maturity,
-                    })
-                })
-                .collect();
-            for (op, o) in st.mempool.pending_outputs(&owner) {
-                v.push(json!({"txid": hex(&op.txid), "vout": op.vout, "value": o.value, "height": null,
-                              "coinbase": false, "confirmed": false, "spendable": true}));
-            }
-            Ok(json!(v))
+            Ok(json!(utxos_of(&st, &owner)))
         }
         "getpeerinfo" | "peers" => {
             let v: Vec<Value> = st
@@ -341,10 +534,21 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
     }
 }
 
-/// Minimal client for tests and tools: one request per connection; sends `REQUANT_RPC_TOKEN` if set.
+/// The token a client sends: `REQUANT_RPC_TOKEN`, else the contents of the cookie file named by
+/// `REQUANT_RPC_COOKIE`.
+fn client_token() -> Option<String> {
+    if let Ok(t) = std::env::var("REQUANT_RPC_TOKEN") {
+        return Some(t);
+    }
+    let path = std::env::var("REQUANT_RPC_COOKIE").ok()?;
+    std::fs::read_to_string(path).ok().map(|t| t.trim().to_string())
+}
+
+/// Minimal client for tests and tools: one request per connection; sends the token if one is configured
+/// (see `client_token`).
 pub fn request(addr: SocketAddr, method: &str, params: Value) -> io::Result<Value> {
     let body = json!({"method": method, "params": params}).to_string();
-    let auth = std::env::var("REQUANT_RPC_TOKEN").map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
+    let auth = client_token().map(|t| format!("Authorization: Bearer {t}\r\n")).unwrap_or_default();
     let mut s = TcpStream::connect(addr)?;
     write!(
         s,

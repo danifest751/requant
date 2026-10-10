@@ -31,6 +31,24 @@ reads them through the operating system's cache, so its own memory stays small (
 given back when other programs need it). A block is verified in about 0.1 s. JSON-RPC listens on
 `127.0.0.1:19334` only.
 
+**RPC.** JSON-RPC 2.0 (`"jsonrpc": "2.0"`, an `id`, batches of up to 100, notifications without an `id`,
+standard error codes); requests without `"jsonrpc"` are answered in the older `{"result", "error"}` form,
+which miners and older tools use. Parameters are positional. Methods: `getinfo`, `getnetworkinfo`,
+`getpeerinfo`, `addpeer`, `getblock` and `getblockheader` (a height or an id), `getblockhash`,
+`getchaintips`, `gettx`, `decodetx`, `sendtx`, `getrawmempool [verbose]`, `getmempoolinfo`,
+`estimatefee [blocks]` (atoms per byte to get in within that many blocks of the pool's queue),
+`utxos`, `getbalance`, `history` (by key hash), `validateaddress`, `getwork payee [longpollid]` (with the
+`longpollid` of the last work it waits up to 60 s for the next block), `submitwork`, `auditsupply`,
+`getevents`, `getrelease`, `submitrelease`, `stop` (from localhost only). With `--rpc-cookie` the node
+writes a random token to `<datadir>/test/.cookie` at start and requires it (`Authorization: Bearer`);
+the wallet takes the file with `--rpc-cookie FILE`. `--rpc-token-file` sets a fixed token.
+
+```sh
+curl -s 127.0.0.1:19334 -d '{"jsonrpc":"2.0","id":1,"method":"estimatefee","params":[3]}'
+curl -s 127.0.0.1:19334 -d '[{"jsonrpc":"2.0","id":1,"method":"getblockhash","params":[0]},
+                              {"jsonrpc":"2.0","id":2,"method":"getmempoolinfo"}]'
+```
+
 **Updates.** Releases are signed with the Requant release key, built into the node. Nodes pass the newest
 signed release to each other; `getinfo` shows `update_available` and the log says so. Started with
 `--auto-update`, a node installs it by itself: at a random moment within 30 minutes it downloads its
@@ -91,7 +109,9 @@ online machine about the fee, and refuses a payment whose coins or change are no
 **Single keys** (the older format) still work: `keygen my.key`, `encrypt my.key`, `address my.key`, and
 `balance`, `history`, `coins`, `send`, `consolidate` with a key file in place of the wallet.
 
-The fee follows the transaction's size: `--fee-rate` atoms per byte (default 5, at least 1000 atoms). A
+The fee follows the transaction's size, at least 1000 atoms: `--fee-rate` takes atoms per byte or `fast`,
+`normal` (the default) or `slow`, the node's `estimatefee` for the next 1, 3 or 10 blocks (5 atoms per byte
+with a node that has no estimate). A
 transaction takes at most 600 inputs; with more coins, `send ... all` and `consolidate` handle the first
 600, so run them again. `--yes` skips the question (scripts).
 

@@ -951,7 +951,7 @@ pub fn serve(shared: Shared, addr: SocketAddr) -> std::io::Result<SocketAddr> {
         }
         _ => Err(format!("unknown method {method}")),
     });
-    let at = serve_with(addr, None, 64 << 10, 64, handler)?;
+    let at = serve_with(addr, vec![], 64 << 10, 64, handler)?;
     std::thread::spawn(move || loop {
         std::thread::sleep(Duration::from_secs(5));
         let mut st = shared.lock().unwrap();

@@ -72,3 +72,22 @@ fn minimum_fee_eviction_by_rate_and_descendants() {
     assert!(!pool.contains(&low_id) && !pool.contains(&child_id), "the cheapest and what spends it are gone");
     assert!(pool.bytes() <= 2 * size + 10);
 }
+
+#[test]
+fn fee_estimate_follows_the_queue() {
+    let (chain, coins) = funded(3);
+    let value = |op: &OutPoint| chain.coin(op).unwrap().output.value;
+    let size = spend(&chain, coins[0], value(&coins[0]), 1000).encode().len();
+    let mut pool = Mempool::default();
+    // an empty pool: the minimum gets in
+    assert_eq!(pool.rate_for(1000), 1);
+    // three transactions at 10, 20 and 30 atoms per byte
+    for (k, r) in [10u64, 20, 30].iter().enumerate() {
+        pool.add(spend(&chain, coins[k], value(&coins[k]), r * size as u64), &chain).unwrap();
+    }
+    // room for all three ahead: the minimum; room for one: beat the second (20); for two: beat 10
+    assert_eq!(pool.rate_for(3 * size), 1);
+    assert_eq!(pool.rate_for(size), 21);
+    assert_eq!(pool.rate_for(2 * size), 11);
+    assert_eq!(pool.rate_for(0), 31);
+}

@@ -198,6 +198,40 @@ impl Chain {
         Ok(c)
     }
 
+    /// Blocks no other known block builds on, and the best tip: `(id, height, status, branch length)`, the
+    /// branch length being how many of its blocks are off the best chain. Status: "active" (the best
+    /// tip), "valid-fork", "unchecked" (stored, never connected), "invalid". Highest first.
+    pub fn tips(&self) -> Vec<(Hash, u64, &'static str, u64)> {
+        let parents: std::collections::HashSet<Hash> = self.entries.values().map(|e| e.header.prev).collect();
+        let tip = self.tip();
+        let mut v = Vec::new();
+        for (id, e) in &self.entries {
+            if parents.contains(id) && *id != tip {
+                continue;
+            }
+            let (mut branch, mut cur) = (0u64, *id);
+            while let Some(c) = self.entries.get(&cur) {
+                if self.active_id(c.height) == Some(cur) {
+                    break;
+                }
+                branch += 1;
+                cur = c.header.prev;
+            }
+            let status = if *id == tip {
+                "active"
+            } else {
+                match e.status {
+                    Status::Valid => "valid-fork",
+                    Status::Checked => "unchecked",
+                    Status::Invalid => "invalid",
+                }
+            };
+            v.push((*id, e.height, status, branch));
+        }
+        v.sort_by_key(|t| std::cmp::Reverse(t.1));
+        v
+    }
+
     /// Ids and headers of the best chain from height 1 on (for rebuilding the header chain at start).
     pub fn best_headers(&self) -> Vec<(Hash, Header)> {
         self.active[1..].iter().map(|id| (*id, self.entries[id].header)).collect()
