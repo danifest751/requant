@@ -17,7 +17,8 @@ Nothing here is a security or investment claim.
    [latest release](https://github.com/danifest751/requant/releases/latest) and make a key:
    `requant-wallet keygen my.key` prints your address (`trq1...`) and key hash.
 2. **Test coins.** The **faucet** at http://193.187.93.29:19380/faucet sends 10 RQT to your address, once a
-   day per address.
+   day per address. Mined more than you need? Top it up:
+   `trq1q8pqnx3uqer6jcxszen4tg3hylh5q645ae23yvra62a2nu98slqaqvvyume`.
 3. **Mine.** The GPU miner is **CPPminer** (NVIDIA, RTX 20xx / Turing or newer): download
    `cppminer-win64-cuda.zip` or `cppminer-linux-x64-cuda.tar.gz` from the
    [CPPminer releases](https://github.com/danifest751/CPPminer/releases/latest), check the GPU with

@@ -471,21 +471,32 @@ fn faucet_page(st: &crate::node::State, outcome: Option<Result<Hash, String>>) -
         }
         None => {}
     }
-    body += "<form method=\"post\" action=\"/faucet\" style=\"display:flex;gap:8px;margin:16px 0;max-width:720px\">             <input name=\"to\" placeholder=\"Your test-network address (trq1...)\" aria-label=\"Address\" required>             <button style=\"padding:9px 16px;border-radius:10px;border:0;background:var(--acc);color:#fff;font-weight:600\">Send me coins</button></form>";
-    let cards = [
-        (format!("{} RQT", format_amount(balance)), "faucet balance".to_string()),
-        (
-            format!("{} / {} RQT", format_amount(f.given_today), format_amount(f.cfg.daily)),
-            "given today / daily budget".to_string(),
-        ),
-    ];
-    body += "<div class=\"cards\">";
-    for (v, l) in cards {
-        body += &format!("<div class=\"card\"><div class=\"k\">{l}</div><div class=\"v\">{v}</div></div>");
-    }
+    body += "<form class=\"lookup\" method=\"post\" action=\"/faucet\" style=\"margin:16px 0;max-width:720px\">             <input name=\"to\" placeholder=\"Your test-network address (trq1...)\" aria-label=\"Address\" required>             <button class=\"btn pri\">Send me coins</button></form>";
+    let left = balance / f.cfg.amount.max(1);
+    body += "<div class=\"kpis\">";
+    body += &kpi(
+        "Faucet balance",
+        &format!("{}<small>RQT</small>", rqt2(balance)),
+        &format!("enough for about {left} requests"),
+        true,
+    );
+    body += &kpi(
+        "Given today",
+        &format!("{}<small>RQT</small>", rqt2(f.given_today)),
+        &format!("of {} RQT a day", rqt(f.cfg.daily)),
+        false,
+    );
+    body += &kpi("Per request", &format!("{}<small>RQT</small>", rqt(f.cfg.amount)), "once a day per address", false);
+    body += "</div>";
     let fa = address(net, &f.owner);
     body += &format!(
-        "</div><p class=\"mut\">Faucet address <a class=\"mono\" href=\"/address/{fa}\">{fa}</a>: send unused test coins back          here. No address yet? <code>requant-wallet keygen my.key</code> prints one.</p><h2>Recent</h2><div class=\"tbl\"><table>         <thead><tr><th>Time (UTC)</th><th>To</th><th>Transaction</th></tr></thead><tbody>"
+        "<div class=\"panel\" style=\"margin-top:14px\"><h3>Top up the faucet</h3>\
+         <p>Mined more test coins than you need? Send them to the faucet so others can try the network:</p>\
+         <code class=\"cmd2\">{fa}</code>\
+         <code class=\"cmd2\">requant-wallet send my.key {fa} 100</code>\
+         <p style=\"margin-top:8px\"><a href=\"/address/{fa}\">Faucet address on the explorer</a>. No address yet? \
+         <code>requant-wallet keygen my.key</code> prints one.</p></div>\
+         <h2>Recent</h2><div class=\"tbl\"><table><thead><tr><th>Time (UTC)</th><th>To</th><th>Transaction</th></tr></thead><tbody>"
     );
     if f.recent.is_empty() {
         body += "<tr><td colspan=\"3\" class=\"empty\">No requests yet.</td></tr>";

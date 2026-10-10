@@ -11,7 +11,7 @@ chain may be reset when the rules change (a reset changes the genesis time in `c
 | Seed nodes | `193.187.93.29:19333`, `193.32.188.248:19333`, `185.174.40.96:19333` |
 | Explorer | http://193.187.93.29:19380/ |
 | Mining pool | `193.187.93.29:19340` (1% fee, PPLNS, payouts from 1 RQT; stats at http://193.187.93.29:19380/pool) |
-| Faucet | http://193.187.93.29:19380/faucet (10 RQT a day per address) |
+| Faucet | http://193.187.93.29:19380/faucet (10 RQT a day per address); top it up at `trq1q8pqnx3uqer6jcxszen4tg3hylh5q645ae23yvra62a2nu98slqaqvvyume` |
 | Node and wallet | `requantd`, `requant-wallet` for Linux and Windows: [releases](https://github.com/danifest751/requant/releases/latest) |
 | GPU miner | CPPminer `--algo tnet`: [releases](https://github.com/danifest751/CPPminer/releases/latest) |
 | Development fund | `trq1qvfkg4mygtgkcthzsnjdpgqdujda8vm92cg62vas08aylluhf5gqsezeems` (6%, `CHAIN.md` §8) |
