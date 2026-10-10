@@ -560,3 +560,55 @@ fn old_bodies_leave_memory_and_a_deep_reorg_reads_them_back() {
     assert_eq!(chain.tip(), full.tip());
     assert_eq!(chain.utxo_audit(), full.utxo_audit(), "same UTXO set as a chain holding every body");
 }
+
+#[test]
+fn a_restored_snapshot_equals_the_chain_and_keeps_working() {
+    let src = std::sync::Arc::new(MapBodies(Default::default()));
+    let mut chain = Chain::new(Network::regtest(), 1);
+    let (alice, bob) = (key(1), key(2));
+    let mut ids = vec![chain.tip()];
+    for i in 0..8 {
+        let tip = chain.tip();
+        let txs = if i == 4 {
+            let op = OutPoint { txid: chain.block(&ids[1]).unwrap().txs[0].txid(), vout: 0 };
+            vec![spend(&chain, &alice, op, &addr(&bob), ATOMS_PER_RQT)]
+        } else {
+            vec![]
+        };
+        let b = block_on(&mut chain, &tip, &addr(&alice), txs);
+        src.0.lock().unwrap().insert(b.id(&chain.net), b.clone());
+        ids.push(b.id(&chain.net));
+        assert_eq!(chain.accept(b, NOW), Ok(Accepted::NewTip));
+    }
+    // a side branch is part of the index too
+    let side = block_on(&mut chain, &ids[6], &addr(&bob), vec![]);
+    src.0.lock().unwrap().insert(side.id(&chain.net), side.clone());
+    assert_eq!(chain.accept(side.clone(), NOW), Ok(Accepted::SideChain));
+
+    let snap = chain.snapshot();
+    let mut back = Chain::restore(Network::regtest(), 1, &snap).unwrap();
+    back.set_body_source(src.clone(), 3);
+    assert_eq!((back.tip(), back.height(), back.issued()), (chain.tip(), chain.height(), chain.issued()));
+    assert_eq!(back.utxo_audit(), chain.utxo_audit());
+    assert_eq!(back.snapshot().len(), snap.len());
+    assert_eq!(back.best_headers().len() as u64, back.height());
+    assert_eq!(back.block(&ids[2]).unwrap().header.height, 2, "old bodies come from the source");
+
+    // both grow the same way, including a reorg onto the side branch read back from the source
+    let mut parent = side.id(&chain.net);
+    for _ in 0..3 {
+        let b = block_on(&mut chain, &parent, &addr(&bob), vec![]);
+        parent = b.id(&chain.net);
+        src.0.lock().unwrap().insert(parent, b.clone());
+        let r = chain.accept(b.clone(), NOW).unwrap();
+        assert_eq!(back.accept(b, NOW).unwrap(), r);
+    }
+    assert_eq!(back.tip(), chain.tip());
+    assert_eq!(back.utxo_audit(), chain.utxo_audit());
+
+    // damage is refused, not half-loaded
+    assert!(Chain::restore(Network::regtest(), 1, &snap[..snap.len() - 1]).is_err());
+    let mut other = snap.clone();
+    other[0] ^= 1;
+    assert!(Chain::restore(Network::regtest(), 1, &other).is_err());
+}

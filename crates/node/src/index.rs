@@ -1,10 +1,12 @@
 //! Transaction and address index over the best chain: where each transaction is, every output (to resolve
 //! inputs), and per-address history (received and sent per transaction). Follows reorganisations by
-//! unindexing blocks above the fork point. Held in memory and rebuilt on start.
+//! unindexing blocks above the fork point. Held in memory; restored from the start-up snapshot or rebuilt.
 
 use requant_consensus::block::Block;
 use requant_consensus::chain::Chain;
+use requant_consensus::codec::{Reader, Writer};
 use requant_consensus::tx::{Hash, OutPoint, Output, Tx};
+use requant_consensus::Error;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,6 +89,68 @@ impl TxIndex {
             v.retain(|e| e.height < height);
         }
         self.addr.retain(|_, v| !v.is_empty());
+    }
+
+    /// The index's state, for the node's start-up snapshot (see `snapshot`).
+    pub fn snapshot(&self, w: &mut Writer) {
+        w.u64(self.active.len() as u64);
+        for id in &self.active {
+            w.raw(id);
+        }
+        w.u64(self.txs.len() as u64);
+        for (txid, l) in &self.txs {
+            w.raw(txid);
+            w.u64(l.height);
+            w.raw(&l.block);
+            w.u32(l.pos);
+        }
+        w.u64(self.outputs.len() as u64);
+        for (op, o) in &self.outputs {
+            w.raw(&op.txid);
+            w.u32(op.vout);
+            w.u64(o.value);
+            w.raw(&o.pkh);
+        }
+        w.u64(self.addr.len() as u64);
+        for (owner, events) in &self.addr {
+            w.raw(owner);
+            w.u64(events.len() as u64);
+            for e in events {
+                w.u64(e.height);
+                w.raw(&e.txid);
+                w.u64(e.received);
+                w.u64(e.sent);
+            }
+        }
+    }
+
+    pub fn restore(r: &mut Reader) -> Result<TxIndex, Error> {
+        let mut x = TxIndex::default();
+        for _ in 0..r.u64()? {
+            x.active.push(r.arr32()?);
+        }
+        for _ in 0..r.u64()? {
+            let txid = r.arr32()?;
+            x.txs.insert(txid, TxLoc { height: r.u64()?, block: r.arr32()?, pos: r.u32()? });
+        }
+        for _ in 0..r.u64()? {
+            let op = OutPoint { txid: r.arr32()?, vout: r.u32()? };
+            x.outputs.insert(op, Output { value: r.u64()?, pkh: r.arr32()? });
+        }
+        for _ in 0..r.u64()? {
+            let owner = r.arr32()?;
+            let mut events = Vec::new();
+            for _ in 0..r.u64()? {
+                events.push(Event { height: r.u64()?, txid: r.arr32()?, received: r.u64()?, sent: r.u64()? });
+            }
+            x.addr.insert(owner, events);
+        }
+        Ok(x)
+    }
+
+    /// The best-chain tip the index follows.
+    pub fn tip(&self) -> Option<Hash> {
+        self.active.last().copied()
     }
 
     pub fn height(&self) -> Option<u64> {

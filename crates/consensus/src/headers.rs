@@ -13,9 +13,10 @@ use crate::Error;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// A verified header. Its work claim is checked on arrival and not kept (272 bytes a block): the block
+/// id, the key, already commits to it.
 struct HEntry {
     header: Header,
-    claim: Claim,
     /// Cumulative work up to and including this header.
     work: U256,
 }
@@ -34,7 +35,7 @@ impl HeaderChain {
         let g = genesis(&net);
         let id = g.id(&net);
         let mut entries = HashMap::new();
-        entries.insert(id, HEntry { work: U256::work(&g.header.target), header: g.header, claim: g.claim });
+        entries.insert(id, HEntry { work: U256::work(&g.header.target), header: g.header });
         HeaderChain { net, entries, best: vec![id], threads: threads.max(1), max_reorg: u64::MAX }
     }
 
@@ -63,9 +64,9 @@ impl HeaderChain {
         self.entries.contains_key(id)
     }
 
-    /// A known header with its work claim.
-    pub fn header(&self, id: &Hash) -> Option<(Header, Claim)> {
-        self.entries.get(id).map(|e| (e.header, e.claim.clone()))
+    /// A known header.
+    pub fn header(&self, id: &Hash) -> Option<Header> {
+        self.entries.get(id).map(|e| e.header)
     }
 
     pub fn best_id(&self, height: u64) -> Option<Hash> {
@@ -147,6 +148,17 @@ impl HeaderChain {
         self.best.extend(path.into_iter().rev());
     }
 
+    /// Record a header the block chain already holds, by its block id (a quick start from a snapshot, where
+    /// the claim is not at hand). Ignored if known or if its parent is unknown.
+    pub fn add_known(&mut self, id: Hash, header: Header) {
+        if self.entries.contains_key(&id) {
+            return;
+        }
+        let Some(parent) = self.entries.get(&header.prev) else { return };
+        let work = parent.work.saturating_add(&U256::work(&header.target));
+        self.insert(id, HEntry { header, work });
+    }
+
     /// Record the header of a block the block chain accepted (already fully verified). Ignored if known or
     /// if its parent is unknown.
     pub fn add_valid(&mut self, header: &Header, claim: &Claim) {
@@ -156,7 +168,7 @@ impl HeaderChain {
         }
         let Some(parent) = self.entries.get(&header.prev) else { return };
         let work = parent.work.saturating_add(&U256::work(&header.target));
-        self.insert(id, HEntry { header: *header, claim: claim.clone(), work });
+        self.insert(id, HEntry { header: *header, work });
     }
 
     /// Verify a header and its work claim against its parent (CHAIN.md §5 items 1–4) and add it. Returns
@@ -227,7 +239,7 @@ impl HeaderChain {
         }
         let Some(parent) = self.entries.get(&header.prev) else { return false };
         let work = parent.work.saturating_add(&U256::work(&header.target));
-        self.insert(id, HEntry { header, claim, work });
+        self.insert(id, HEntry { header, work });
         true
     }
 

@@ -184,10 +184,14 @@ pub struct State {
     inflight: HashMap<Hash, (u64, u64)>,
     pub mempool: Mempool,
     pub index: TxIndex,
+    /// The height the start-up snapshot restored (`None`: the block file was replayed from the start).
+    pub restored: Option<u64>,
     pub book: AddrBook,
     store: Store,
     /// Where the bodies in `store` are, for the chain to read old ones back.
     bodies: Arc<crate::store::Bodies>,
+    /// The start-up snapshot (see `snapshot`).
+    snapshot_path: PathBuf,
     /// Orphans with the peer that sent them and their size.
     orphans: HashMap<Hash, (Block, Option<u64>, usize)>,
     orphan_bytes: usize,
@@ -314,6 +318,13 @@ impl State {
 
     /// Write the mempool to `mempool.dat` if it changed (each transaction as LE32 length and bytes, in arrival
     /// order; written to a temporary file, then renamed).
+    /// The start-up snapshot of the current state, if any block is stored (cheap: taken under the lock and
+    /// written by the caller after releasing it).
+    pub fn snapshot_bytes(&self) -> Option<(PathBuf, Vec<u8>)> {
+        let last = self.store.last()?;
+        Some((self.snapshot_path.clone(), crate::snapshot::encode(&self.chain, &self.index, &self.bodies, last)))
+    }
+
     pub fn save_mempool(&mut self) {
         if self.mempool.version() == self.mempool_saved {
             return;
@@ -1000,10 +1011,39 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
             "TNet self-test failed: {e}; this build or this machine cannot verify blocks"
         )));
     }
-    let (store, records) = Store::open(&dir)?;
-    let bodies = Arc::new(store.bodies(cfg.net.clone())?);
-    let mut chain = Chain::new(cfg.net.clone(), cfg.threads);
+    // REQUANT_KEEP_BODIES overrides the window (to exercise reading bodies back in tests)
+    let keep = std::env::var("REQUANT_KEEP_BODIES").ok().and_then(|v| v.parse().ok()).unwrap_or(KEEP_BODIES);
+    // the start-up snapshot, if it is sound and matches the block file; else everything is replayed
+    let snapshot_path = dir.join("chainstate.bin");
+    let mut from_snapshot = None;
+    if snapshot_path.exists() {
+        match crate::snapshot::load(&snapshot_path, &cfg.net, cfg.threads) {
+            Ok(s) => match Store::open_after(&dir, Some(s.last))? {
+                Some(opened) => from_snapshot = Some((s, opened)),
+                None => eprintln!("snapshot: does not match the block file; replaying it"),
+            },
+            Err(e) => eprintln!("snapshot: {e}; replaying the block file"),
+        }
+    }
+    let restored = from_snapshot.as_ref().map(|(s, _)| s.chain.height());
+    let (store, records, bodies, mut chain, mut index) = match from_snapshot {
+        Some((s, (store, records))) => {
+            let bodies = Arc::new(store.bodies(cfg.net.clone())?);
+            for (id, at, len) in s.bodies {
+                bodies.insert(id, at, len as usize);
+            }
+            eprintln!("snapshot: height {}, {} more records to replay", s.chain.height(), records.len());
+            (store, records, bodies, s.chain, s.index)
+        }
+        None => {
+            let (store, records) = Store::open(&dir)?;
+            let bodies = Arc::new(store.bodies(cfg.net.clone())?);
+            (store, records, bodies, Chain::new(cfg.net.clone(), cfg.threads), TxIndex::default())
+        }
+    };
     chain.set_max_reorg(cfg.max_reorg);
+    // only the recent bodies stay in memory, during the replay too
+    chain.set_body_source(bodies.clone(), keep);
     let mut replayed = 0;
     for rec in records {
         let r = Block::decode(&rec.data, &cfg.net).map_err(|e| e.to_string()).and_then(|b| {
@@ -1019,18 +1059,13 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     if replayed > 0 {
         eprintln!("replayed {replayed} blocks, height {}", chain.height());
     }
-    let mut index = TxIndex::default();
     index.sync(&chain);
+    // the header chain from the block chain's own headers (verified when the blocks were), no body reads
     let mut headers = HeaderChain::new(cfg.net.clone(), cfg.threads);
     headers.set_max_reorg(cfg.max_reorg);
-    for h in 1..=chain.height() {
-        let b = chain.block(&chain.active_id(h).unwrap()).unwrap();
-        headers.add_valid(&b.header, &b.claim);
+    for (id, header) in chain.best_headers() {
+        headers.add_known(id, header);
     }
-    // from here on only the recent bodies stay in memory
-    // REQUANT_KEEP_BODIES overrides the window (to exercise reading bodies back in tests)
-    let keep = std::env::var("REQUANT_KEEP_BODIES").ok().and_then(|v| v.parse().ok()).unwrap_or(KEEP_BODIES);
-    chain.set_body_source(bodies.clone(), keep);
     let allow_local = cfg.net.name == "regtest";
     let listener = TcpListener::bind(cfg.listen)?;
     let p2p = listener.local_addr()?;
@@ -1040,9 +1075,11 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         inflight: HashMap::new(),
         mempool: Mempool::default(),
         index,
+        restored,
         book: AddrBook::load(Some(dir.join("peers.txt")), allow_local),
         store,
         bodies,
+        snapshot_path,
         orphans: HashMap::new(),
         orphan_bytes: 0,
         peers: HashMap::new(),
@@ -1142,6 +1179,8 @@ fn connection_manager(
     let mut rng = random_u64() | 1;
     let mut warned: HashSet<String> = HashSet::new();
     let (mut last_ping, mut last_save, mut last_mempool) = (0u64, now(), now());
+    // a snapshot at start (after a replay), then every 10 minutes or 100 blocks while the tip moves
+    let (mut last_snapshot, mut snapshot_tip, mut snapshot_height) = (0u64, None, 0u64);
     while !stop.load(Ordering::Relaxed) {
         for addr in &configured {
             let target = addr.to_socket_addrs().ok().and_then(|mut a| a.next());
@@ -1196,11 +1235,31 @@ fn connection_manager(
             last_mempool = t;
             shared.lock().unwrap().save_mempool();
         }
+        let (tip, height) = {
+            let st = shared.lock().unwrap();
+            (st.chain.tip(), st.chain.height())
+        };
+        if snapshot_tip != Some(tip) && (t >= last_snapshot + 600 || height >= snapshot_height + 100) {
+            last_snapshot = t;
+            (snapshot_tip, snapshot_height) = (Some(tip), height);
+            write_snapshot(&shared);
+        }
         std::thread::sleep(interval);
     }
     let mut st = shared.lock().unwrap();
     st.book.save();
     st.save_mempool();
+    drop(st);
+    write_snapshot(&shared);
+}
+
+fn write_snapshot(shared: &Shared) {
+    let snap = shared.lock().unwrap().snapshot_bytes();
+    if let Some((path, bytes)) = snap {
+        if let Err(e) = crate::snapshot::save(&path, &bytes) {
+            eprintln!("snapshot: {e}");
+        }
+    }
 }
 
 /// Derive the weights of the current and the next epoch off the lock, as soon as their seeds are known,

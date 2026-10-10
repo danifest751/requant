@@ -157,6 +157,7 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "load": crate::load::pressure().map(|p| json!({"cpu_per_core": p.cpu, "memory_free": p.mem_free, "busy": st.busy})),
                 "uploaded_bytes": st.uploaded(),
                 "bodies_in_memory": st.chain.bodies_in_memory(),
+                "snapshot_height": st.restored,
                 "update_available": st.release.as_ref().filter(|r| r.version > crate::release::own_version())
                     .map(|r| r.version_string()),
                 "issued_atoms": st.chain.issued(),

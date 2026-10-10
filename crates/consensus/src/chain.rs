@@ -2,6 +2,7 @@
 //! data, reorganisation, epoch weights, and a reference miner for small networks.
 
 use crate::block::{genesis, Block, Claim, Header, BLOCK_VERSION};
+use crate::codec::{Reader, Writer};
 use crate::params::{tagged, Network, MAX_AMOUNT, MAX_FUTURE_SECS, MTP_WINDOW};
 use crate::pow::{dev_fund_share, next_target, reward};
 use crate::tx::{pkh, Hash, OutPoint, Output, Tx};
@@ -87,7 +88,121 @@ pub const DEEP_FORK: &str = "fork deeper than the reorg limit";
 /// Current and next epoch (512 MiB each for TNet v1).
 const EPOCH_CACHE: usize = 2;
 
+fn write_coin(w: &mut Writer, op: &OutPoint, c: &Coin) {
+    w.raw(&op.txid);
+    w.u32(op.vout);
+    w.u64(c.output.value);
+    w.raw(&c.output.pkh);
+    w.u64(c.height);
+    w.u8(c.coinbase as u8);
+}
+
+fn read_coin(r: &mut Reader) -> Result<(OutPoint, Coin), Error> {
+    let op = OutPoint { txid: r.arr32()?, vout: r.u32()? };
+    let output = Output { value: r.u64()?, pkh: r.arr32()? };
+    Ok((op, Coin { output, height: r.u64()?, coinbase: r.u8()? != 0 }))
+}
+
 impl Chain {
+    /// The chain's state for a quick start: every known block's index entry (id, header, height, time, work,
+    /// issued, status), the best chain, the UTXO set and the undo data. Bodies are not included (the node
+    /// reads them from its block file). Restored by [`Chain::restore`].
+    pub fn snapshot(&self) -> Vec<u8> {
+        let mut w = Writer::default();
+        w.raw(&self.net.chain_id);
+        w.u64(self.entries.len() as u64);
+        for (id, e) in &self.entries {
+            w.raw(id);
+            w.raw(&e.header.encode());
+            w.u64(e.time);
+            w.raw(&e.work.to_be_bytes());
+            w.u64(e.issued);
+            w.u8(match e.status {
+                Status::Checked => 0,
+                Status::Valid => 1,
+                Status::Invalid => 2,
+            });
+        }
+        w.u64(self.active.len() as u64);
+        for id in &self.active {
+            w.raw(id);
+        }
+        w.u64(self.utxo.len() as u64);
+        for (op, c) in &self.utxo {
+            write_coin(&mut w, op, c);
+        }
+        w.u64(self.undo.len() as u64);
+        for (id, list) in &self.undo {
+            w.raw(id);
+            w.u64(list.len() as u64);
+            for (op, c) in list {
+                write_coin(&mut w, op, c);
+            }
+        }
+        w.0
+    }
+
+    /// A chain from [`Chain::snapshot`] bytes: no body in memory but genesis (set a body source next).
+    pub fn restore(net: Network, threads: usize, bytes: &[u8]) -> Result<Chain, Error> {
+        let mut c = Chain::new(net, threads);
+        let mut r = Reader::new(bytes);
+        if r.arr32()? != c.net.chain_id {
+            return Err(Error::Invalid("snapshot of another network"));
+        }
+        let genesis_id = c.tip();
+        let n = r.u64()?;
+        for _ in 0..n {
+            let id = r.arr32()?;
+            let header = Header::decode(&mut r)?;
+            let time = r.u64()?;
+            let work = U256::from_be_bytes(&r.arr32()?);
+            let issued = r.u64()?;
+            let status = match r.u8()? {
+                0 => Status::Checked,
+                1 => Status::Valid,
+                2 => Status::Invalid,
+                _ => return Err(Error::Decode("snapshot status")),
+            };
+            if id == genesis_id {
+                continue;
+            }
+            c.entries.insert(id, Entry { header, block: None, height: header.height, time, work, issued, status });
+        }
+        let n = r.u64()?;
+        let mut active = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let id = r.arr32()?;
+            if !c.entries.contains_key(&id) {
+                return Err(Error::Invalid("snapshot best chain refers to an unknown block"));
+            }
+            active.push(id);
+        }
+        if active.first() != Some(&genesis_id) {
+            return Err(Error::Invalid("snapshot best chain does not start at genesis"));
+        }
+        c.active = active;
+        for _ in 0..r.u64()? {
+            let (op, coin) = read_coin(&mut r)?;
+            c.utxo.insert(op, coin);
+        }
+        for _ in 0..r.u64()? {
+            let id = r.arr32()?;
+            let mut list = Vec::new();
+            for _ in 0..r.u64()? {
+                list.push(read_coin(&mut r)?);
+            }
+            c.undo.insert(id, list);
+        }
+        r.finish()?;
+        c.dropped_to = c.height();
+        Ok(c)
+    }
+
+    /// Ids and headers of the best chain from height 1 on (for rebuilding the header chain at start).
+    pub fn best_headers(&self) -> Vec<(Hash, Header)> {
+        self.active[1..].iter().map(|id| (*id, self.entries[id].header)).collect()
+    }
+
     pub fn new(net: Network, threads: usize) -> Chain {
         let g = genesis(&net);
         let id = g.id(&net);
