@@ -103,7 +103,7 @@ scripts/check.py local gate
 
 ## Background
 
-Requant and TNet come out of the [Abacus](https://github.com/danifest751/Abacus) research lab, which tested
+Requant and TNet come out of the [Abacus](https://github.com/requant-network/Abacus) research lab, which tested
 linear-algebra proofs of work (Freivalds-verified matrix products, NTT, int8 GEMM with proofs) and
 recorded why most of them fail. TNet is its candidate T (ADR 0015/0016 there).
 

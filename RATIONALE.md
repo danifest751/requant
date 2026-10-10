@@ -1,7 +1,7 @@
 # Why TNet v1 looks the way it does
 
 A summary of the research behind the design. The full record, with measurements, source hashes
-and negative results, is in the [Abacus](https://github.com/danifest751/Abacus) repository; references
+and negative results, is in the [Abacus](https://github.com/requant-network/Abacus) repository; references
 below are to its files.
 
 ## Goal
