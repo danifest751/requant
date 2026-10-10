@@ -91,6 +91,10 @@ fn public_api() {
     assert_eq!(http(explorer, "GET", "/api/nothing", "").0, 404);
     let (code, _, e) = http(explorer, "POST", "/api/tx", "{\"hex\":\"00\"}");
     assert_eq!(code, 400, "{e}");
+    let (code, _, e) = http(explorer, "POST", "/api/package", "{\"hex\":\"00\"}");
+    assert_eq!(code, 400, "{e}");
+    let (code, _, e) = http(explorer, "POST", "/api/package", "{\"hex\":[\"00\",\"zz\"]}");
+    assert_eq!(code, 400, "{e}");
 
     // the rate limit: a burst is served, then 429
     let mut limited = false;

@@ -11,6 +11,10 @@
 //! A transaction that spends what a pooled one spends replaces it (and its descendants) when it pays
 //! more in total, by at least its own size at the minimum rate, and a higher rate than each one it
 //! conflicts with directly (replace by fee).
+//!
+//! Package relay: a transaction may come with unconfirmed parents that pay less than the minimum on their
+//! own (`add_package`), when each, with what spends it, pays the minimum. A parent nothing pays for any
+//! more (its child replaced, evicted or dropped) leaves the pool.
 
 use requant_consensus::chain::Chain;
 use requant_consensus::params::MAX_AMOUNT;
@@ -28,6 +32,20 @@ pub const MIN_FEE_RATE: u64 = 1;
 pub const MAX_AGE: u64 = 72 * 3600;
 /// Most pooled transactions (with descendants) one replacement may evict.
 pub const MAX_REPLACED: usize = 100;
+
+/// Most transactions in a package (a child with its unconfirmed parents, see `Mempool::add_package`).
+pub const MAX_PACKAGE: usize = 25;
+/// Most bytes in a package.
+pub const MAX_PACKAGE_BYTES: usize = 200_000;
+
+/// What `Mempool::check` found about a transfer.
+struct Checked {
+    txid: Hash,
+    size: usize,
+    fee: u64,
+    parents: Vec<Hash>,
+    conflicts: Vec<Hash>,
+}
 
 struct Entry {
     tx: Tx,
@@ -165,8 +183,9 @@ impl Mempool {
         }
     }
 
-    /// Admit a transfer; returns its txid.
-    pub fn add(&mut self, tx: Tx, chain: &Chain) -> Result<Hash, Error> {
+    /// Everything about a transfer that needs no signature check and changes nothing: its inputs exist (in
+    /// the UTXO set, the pool or `package`), match their keys and are unlocked for the next block.
+    fn check(&self, tx: &Tx, chain: &Chain, package: &HashMap<Hash, &Tx>) -> Result<Checked, Error> {
         let txid = tx.txid();
         if self.txs.contains_key(&txid) {
             return Err(Error::Duplicate);
@@ -175,13 +194,12 @@ impl Mempool {
         if size > MAX_TX_BYTES {
             return Err(Error::Invalid("transaction too large for the pool"));
         }
-        // cheap checks and input lookups first; the signatures (the expensive part) last
         tx.check_shape()?;
-        let Tx::Transfer { inputs, outputs } = &tx else { return Err(Error::Invalid("coinbase outside a block")) };
-        requant_consensus::chain::check_activation(&chain.net, &tx, chain.height() + 1)?;
+        let Tx::Transfer { inputs, outputs } = tx else { return Err(Error::Invalid("coinbase outside a block")) };
+        requant_consensus::chain::check_activation(&chain.net, tx, chain.height() + 1)?;
         let mut total_in: u64 = 0;
         let mut parents = Vec::new();
-        // pooled transactions spending the same outputs: replaced if this one pays enough (below)
+        // pooled transactions spending the same outputs: replaced if this one pays enough (see `add`)
         let mut conflicts: Vec<Hash> = Vec::new();
         for i in inputs {
             if let Some(other) = self.spends.get(&i.prev) {
@@ -189,7 +207,13 @@ impl Mempool {
                     conflicts.push(*other);
                 }
             }
-            let (out, parent) = self.coin(chain, &i.prev)?;
+            let (out, parent) = match package.get(&i.prev.txid) {
+                Some(p) => (
+                    *p.outputs().get(i.prev.vout as usize).ok_or(Error::Invalid("missing or spent input"))?,
+                    Some(i.prev.txid),
+                ),
+                None => self.coin(chain, &i.prev)?,
+            };
             if i.owner()? != out.pkh {
                 return Err(Error::Invalid("input key does not match the output"));
             }
@@ -208,6 +232,13 @@ impl Mempool {
         }
         let total_out: u64 = outputs.iter().map(|o| o.value).sum();
         let fee = total_in.checked_sub(total_out).ok_or(Error::Invalid("outputs exceed inputs"))?;
+        Ok(Checked { txid, size, fee, parents, conflicts })
+    }
+
+    /// Admit a transfer; returns its txid.
+    pub fn add(&mut self, tx: Tx, chain: &Chain) -> Result<Hash, Error> {
+        // cheap checks and input lookups first; the signatures (the expensive part) last
+        let Checked { txid, size, fee, parents, conflicts } = self.check(&tx, chain, &HashMap::new())?;
         if fee < size as u64 * MIN_FEE_RATE {
             return Err(Error::Invalid("fee below the minimum (1 atom per byte)"));
         }
@@ -225,13 +256,142 @@ impl Mempool {
             self.remove(id);
         }
         self.make_room(size, fee, &anc)?;
-        for i in inputs {
+        self.insert(txid, tx, fee, size, parents);
+        self.trim_unpaid();
+        Ok(txid)
+    }
+
+    /// Admit a package: a transaction with unconfirmed parents that may pay less than the minimum rate on
+    /// their own (package relay, so a child can pay for a pre-signed parent). The package is listed parents
+    /// first, and each transaction but the last is spent by a later one. Each transaction, with what spends
+    /// it in the package, pays at least the minimum rate. Members already pooled are skipped; a package
+    /// does not replace pooled transactions. Returns the txids admitted.
+    pub fn add_package(&mut self, txs: Vec<Tx>, chain: &Chain) -> Result<Vec<Hash>, Error> {
+        if txs.len() < 2 || txs.len() > MAX_PACKAGE {
+            return Err(Error::Invalid("a package has 2 to 25 transactions"));
+        }
+        let ids: Vec<Hash> = txs.iter().map(|t| t.txid()).collect();
+        if ids.iter().collect::<HashSet<_>>().len() != ids.len() {
+            return Err(Error::Invalid("a transaction twice in the package"));
+        }
+        if txs.iter().map(|t| t.encode().len()).sum::<usize>() > MAX_PACKAGE_BYTES {
+            return Err(Error::Invalid("package too large"));
+        }
+        // spent[k]: the later members spending member k's outputs
+        let spent: Vec<Vec<usize>> = (0..txs.len())
+            .map(|k| (k + 1..txs.len()).filter(|&j| inputs(&txs[j]).iter().any(|i| i.prev.txid == ids[k])).collect())
+            .collect();
+        if spent[..txs.len() - 1].iter().any(|s| s.is_empty()) {
+            return Err(Error::Invalid("not a transaction with its parents"));
+        }
+        let mut known: HashMap<Hash, &Tx> = HashMap::new();
+        let mut checked: Vec<Option<Checked>> = Vec::new();
+        let mut outpoints = HashSet::new();
+        for (k, tx) in txs.iter().enumerate() {
+            if self.txs.contains_key(&ids[k]) {
+                checked.push(None);
+                continue;
+            }
+            let c = self.check(tx, chain, &known)?;
+            if !c.conflicts.is_empty() {
+                return Err(Error::Invalid("package spends what a pooled transaction spends"));
+            }
+            if !inputs(tx).iter().all(|i| outpoints.insert(i.prev)) {
+                return Err(Error::Invalid("package spends an output twice"));
+            }
+            known.insert(ids[k], tx);
+            checked.push(Some(c));
+        }
+        if known.is_empty() {
+            return Err(Error::Duplicate);
+        }
+        // each new member with its new descendants in the package pays the minimum rate (so the last one on
+        // its own does)
+        let paid = |k: usize| -> (u64, usize) {
+            let mut seen = HashSet::from([k]);
+            let mut stack = vec![k];
+            while let Some(cur) = stack.pop() {
+                for &j in &spent[cur] {
+                    if seen.insert(j) {
+                        stack.push(j);
+                    }
+                }
+            }
+            seen.iter().filter_map(|&j| checked[j].as_ref()).fold((0, 0), |(f, s), c| (f + c.fee, s + c.size))
+        };
+        for (k, c) in checked.iter().enumerate() {
+            if c.is_some() {
+                let (fee, size) = paid(k);
+                if fee < size as u64 * MIN_FEE_RATE {
+                    return Err(Error::Invalid("package fee below the minimum (1 atom per byte)"));
+                }
+            }
+        }
+        // pooled ancestors of the whole package
+        let mut anc = HashSet::new();
+        for c in checked.iter().flatten() {
+            for p in c.parents.iter().filter(|p| !known.contains_key(*p)) {
+                anc.insert(*p);
+                self.ancestors(p, &mut anc);
+            }
+        }
+        if anc.len() + known.len() > MAX_ANCESTORS + 1 {
+            return Err(Error::Invalid("too many unconfirmed ancestors"));
+        }
+        for (k, tx) in txs.iter().enumerate() {
+            if checked[k].is_some() {
+                tx.check_signatures(&chain.net.chain_id)?;
+            }
+        }
+        let (fee, size) = checked.iter().flatten().fold((0, 0), |(f, s), c| (f + c.fee, s + c.size));
+        self.make_room(size, fee, &anc)?;
+        let mut added = Vec::new();
+        for (tx, c) in txs.into_iter().zip(checked) {
+            if let Some(Checked { txid, size, fee, parents, .. }) = c {
+                self.insert(txid, tx, fee, size, parents);
+                added.push(txid);
+            }
+        }
+        self.trim_unpaid();
+        Ok(added)
+    }
+
+    fn insert(&mut self, txid: Hash, tx: Tx, fee: u64, size: usize, parents: Vec<Hash>) {
+        for i in inputs(&tx) {
             self.spends.insert(i.prev, txid);
         }
         self.bytes += size;
         self.seq += 1;
         self.txs.insert(txid, Entry { tx, fee, size, parents, seq: self.seq, time: crate::node::now() });
-        Ok(txid)
+    }
+
+    /// Drop transactions paying below the minimum rate that nothing pooled pays for any more (a package
+    /// parent whose child was replaced, evicted or dropped), with what spends them.
+    fn trim_unpaid(&mut self) {
+        loop {
+            let low: Vec<Hash> =
+                self.txs.iter().filter(|(_, e)| e.fee < e.size as u64 * MIN_FEE_RATE).map(|(id, _)| *id).collect();
+            if low.is_empty() {
+                return;
+            }
+            let children = self.children();
+            let mut memo = HashMap::new();
+            let unpaid: Vec<Hash> = low
+                .into_iter()
+                .filter(|id| {
+                    let (fee, size) = self.with_descendants(id, &children, &mut memo);
+                    fee < size as u64 * MIN_FEE_RATE
+                })
+                .collect();
+            if unpaid.is_empty() {
+                return;
+            }
+            for id in unpaid {
+                for d in self.descendants(&id) {
+                    self.remove(&d);
+                }
+            }
+        }
     }
 
     /// What admitting a transaction paying `fee` for `size` bytes would evict: the pooled transactions it
@@ -419,6 +579,7 @@ impl Mempool {
             };
             self.txs.get_mut(&id).unwrap().parents = parents;
         }
+        self.trim_unpaid();
     }
 
     /// Transactions for a block, up to `max_bytes`, best package first: each transaction is ranked by the

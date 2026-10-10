@@ -138,8 +138,13 @@ revocable = hash[32] || claim_pkh[32] || refund_pkh[32] || revoke_pkh[32] || LE6
 ### 4.3 Pool policy (not consensus)
 
 - Blocks take transactions by the fee rate of the package they complete: a transaction with its
-  unconfirmed ancestors. A child paying well pulls in a cheap parent (child pays for parent); every
-  transaction must still pay the minimum relay rate (1 atom per byte) on its own.
+  unconfirmed ancestors. A child paying well pulls in a cheap parent (child pays for parent).
+- The minimum relay rate is 1 atom per byte. A transaction sent alone must pay it on its own. A
+  package (P2P protocol 5, RPC `sendpackage`, API `POST /api/package`; node 0.17.0) is a transaction
+  with up to 24 unconfirmed parents, parents first, each spent by a later member: every member with
+  its descendants in the package must pay the minimum, so a child can carry a parent paying nothing.
+  A package does not replace pooled transactions. A parent that nothing pooled pays for any more
+  (its child replaced, evicted or dropped) leaves the pool.
 - A full pool drops the transactions with the lowest rate, each judged by the better of its own rate
   and its rate with its descendants, so a well-paying child keeps its parent.
 - Replace by fee: a transaction spending an output a pooled one spends replaces it and its

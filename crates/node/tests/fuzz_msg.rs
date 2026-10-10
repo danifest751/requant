@@ -37,6 +37,7 @@ fn message_decoder_never_panics() {
         Msg::GetAddr,
         Msg::Ping(7),
         Msg::Tx(vec![0; 40]),
+        Msg::Package(vec![vec![0; 40], vec![1; 8]]),
         Msg::Release(vec![5, 0, b'h', b'e', b'l', b'l', b'o'].into_iter().chain([0; 64]).collect()),
     ];
     let frames: Vec<Vec<u8>> = samples

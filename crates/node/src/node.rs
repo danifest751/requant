@@ -6,8 +6,8 @@ use crate::addrbook::{routable, AddrBook};
 use crate::index::TxIndex;
 use crate::mempool::Mempool;
 use crate::msg::{
-    read_msg, write_msg, Msg, HEADERS_PROTOCOL, MAX_ADDR, MAX_HEADERS, MAX_INV, MIN_PROTOCOL, PROTOCOL,
-    RELEASE_PROTOCOL,
+    read_msg, write_msg, Msg, HEADERS_PROTOCOL, MAX_ADDR, MAX_HEADERS, MAX_INV, MIN_PROTOCOL, PACKAGE_PROTOCOL,
+    PROTOCOL, RELEASE_PROTOCOL,
 };
 use crate::store::Store;
 use requant_consensus::block::tx_root;
@@ -362,16 +362,58 @@ impl State {
     /// Re-admit the saved mempool (each transaction checked again against the chain).
     fn load_mempool(&mut self) -> usize {
         let Ok(b) = std::fs::read(&self.mempool_path) else { return 0 };
-        let (mut k, mut n) = (0usize, 0usize);
+        let (mut k, mut txs) = (0usize, Vec::new());
         while k + 4 <= b.len() {
             let len = u32::from_le_bytes(b[k..k + 4].try_into().unwrap()) as usize;
             let Some(raw) = b.get(k + 4..k + 4 + len) else { break };
             if let Ok(tx) = Tx::decode_exact(raw) {
-                n += self.mempool.add(tx, &self.chain).is_ok() as usize;
+                txs.push(tx);
             }
             k += 4 + len;
         }
+        let n = self.readmit(txs);
         self.mempool_saved = self.mempool.version();
+        n
+    }
+
+    /// Admit transactions in order (parents first), each alone or, when it fails, as a package with the
+    /// earlier failed ones it spends (a parent below the minimum fee and the child paying for it). Returns
+    /// how many were admitted.
+    fn readmit(&mut self, txs: Vec<Tx>) -> usize {
+        let mut waiting: Vec<Option<Tx>> = Vec::new();
+        let mut index: HashMap<Hash, usize> = HashMap::new();
+        let mut n = 0;
+        for tx in txs {
+            if self.mempool.add(tx.clone(), &self.chain).is_ok() {
+                n += 1;
+                continue;
+            }
+            // the failed transactions it descends from, in their order
+            let mut found: Vec<usize> = Vec::new();
+            let mut stack: Vec<Hash> = spent_txids(&tx);
+            while let Some(id) = stack.pop() {
+                if let Some(&k) = index.get(&id) {
+                    if !found.contains(&k) && found.len() < crate::mempool::MAX_PACKAGE - 1 {
+                        found.push(k);
+                        stack.extend(waiting[k].as_ref().map(spent_txids).unwrap_or_default());
+                    }
+                }
+            }
+            if !found.is_empty() {
+                found.sort_unstable();
+                let mut pkg: Vec<Tx> = found.iter().filter_map(|&k| waiting[k].clone()).collect();
+                pkg.push(tx.clone());
+                if let Ok(ids) = self.mempool.add_package(pkg, &self.chain) {
+                    n += ids.len();
+                    for k in found {
+                        waiting[k] = None;
+                    }
+                    continue;
+                }
+            }
+            index.insert(tx.txid(), waiting.len());
+            waiting.push(Some(tx));
+        }
         n
     }
 
@@ -441,11 +483,9 @@ impl State {
                     if acc != Accepted::SideChain {
                         self.mempool.revalidate(&self.chain);
                         // transactions of blocks a reorganisation took off the chain go back to the pool
-                        for old in self.chain.take_disconnected() {
-                            for tx in &old.txs[1..] {
-                                let _ = self.mempool.add(tx.clone(), &self.chain);
-                            }
-                        }
+                        let old: Vec<Tx> =
+                            self.chain.take_disconnected().iter().flat_map(|b| b.txs[1..].to_vec()).collect();
+                        self.readmit(old);
                         self.index.sync(&self.chain);
                     }
                     // announce new blocks, not the history being downloaded
@@ -599,6 +639,20 @@ impl State {
         let txid = self.mempool.add(tx, &self.chain)?;
         self.broadcast(&Msg::Tx(bytes), from);
         Ok(txid)
+    }
+
+    /// Admit a package (a transaction with unconfirmed parents, parents first) and relay it to peers that
+    /// understand packages.
+    pub fn process_package(&mut self, txs: Vec<Tx>, from: Option<u64>) -> Result<Vec<Hash>, Error> {
+        let bytes: Vec<Vec<u8>> = txs.iter().map(|t| t.encode()).collect();
+        let ids = self.mempool.add_package(txs, &self.chain)?;
+        let m = Msg::Package(bytes);
+        for (id, p) in &self.peers {
+            if Some(*id) != from && p.protocol >= PACKAGE_PROTOCOL {
+                p.deliver(m.clone());
+            }
+        }
+        Ok(ids)
     }
 
     /// A block template for `payee` with pooled transactions, remembered for `submit_work`.
@@ -822,6 +876,19 @@ impl State {
                     _ => {}
                 }
             }
+            Msg::Package(list) => {
+                let txs = list
+                    .iter()
+                    .map(|b| Tx::decode_exact(b))
+                    .collect::<Result<Vec<Tx>, _>>()
+                    .map_err(|_| "malformed transaction")?;
+                match self.process_package(txs, Some(peer)) {
+                    Err(Error::Invalid("bad signature")) | Err(Error::Invalid("bad public key")) => {
+                        return Err("invalid transaction")
+                    }
+                    _ => {}
+                }
+            }
             Msg::Release(bytes) => {
                 let r = crate::release::Release::decode(&bytes, &self.release_key).map_err(|_| "invalid release")?;
                 if self.take_release(r) {
@@ -832,6 +899,14 @@ impl State {
             Msg::Pong(_) => {}
         }
         Ok(())
+    }
+}
+
+/// The transactions whose outputs a transfer spends.
+fn spent_txids(tx: &Tx) -> Vec<Hash> {
+    match tx {
+        Tx::Transfer { inputs, .. } => inputs.iter().map(|i| i.prev.txid).collect(),
+        Tx::Coinbase { .. } => Vec::new(),
     }
 }
 

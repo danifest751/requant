@@ -63,6 +63,7 @@ impl Backend {
         // a list of key hashes (a whole wallet in one request)
         let list = params[0].as_array().map(|a| a.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(","));
         let (verb, path, body) = match (method, list) {
+            ("sendpackage", _) => ("POST", "/api/package".to_string(), Some(json!({"hex": params[0]}).to_string())),
             ("utxos", Some(l)) => ("GET", format!("/api/utxos?owners={l}"), None),
             ("history", Some(l)) => {
                 ("GET", format!("/api/history?owners={l}&limit={}", p(1).unwrap_or("100".into())), None)
@@ -73,8 +74,12 @@ impl Backend {
         if status != 200 {
             return Err(io::Error::other(v["error"].as_str().unwrap_or("API error").to_string()));
         }
-        // sendtx answers the txid itself, as RPC does
-        Ok(if method == "sendtx" { v["txid"].clone() } else { v })
+        // sendtx and sendpackage answer the txids themselves, as RPC does
+        Ok(match method {
+            "sendtx" => v["txid"].clone(),
+            "sendpackage" => v["txids"].clone(),
+            _ => v,
+        })
     }
 
     /// The API request for a call with plain parameters.

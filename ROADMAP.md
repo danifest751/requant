@@ -72,7 +72,8 @@ test network.
 - [x] Pool policy: child-pays-for-parent and replace by fee (node 0.16.0); anyone-can-pay inputs.
 - [x] Wallet commands for conditions: `condition`, `spend-condition` (every path, with its locks),
       `cosign` for 2-of-2, `secret`, `pubkey` (wallet 0.5.0).
-- [ ] Package relay, so a pre-signed parent below the minimum fee can travel with its child.
+- [x] Package relay (node 0.17.0, P2P protocol 5): a pre-signed parent below the minimum fee travels
+      with its child (`sendpackage`, `POST /api/package`, `requant-wallet broadcast PARENT CHILD`).
 - [ ] Two-way channels on the revocable templates; routed payments over revocable HTLCs.
 - [ ] One-way payment channels for MagnetGate (deposit, expiry refund, payment states).
 - [ ] HTLC swaps with Bitcoin-family chains and EVM; maker bot; documented privacy limits.

@@ -618,6 +618,22 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
             let tx = Tx::decode_exact(&unhex(arg(0)?.as_str().ok_or("expected hex")?)?).map_err(|e| e.to_string())?;
             st.process_tx(tx, None).map(|id| json!(hex(&id))).map_err(|e| e.to_string())
         }
+        "sendpackage" => {
+            // [hex, ...] or [[hex, ...]]: a transaction with its unconfirmed parents, parents first
+            let list = match p.first() {
+                Some(Value::Array(v)) => v.as_slice(),
+                _ => p,
+            };
+            let txs = list
+                .iter()
+                .map(|v| {
+                    Tx::decode_exact(&unhex(v.as_str().ok_or("expected hex")?)?).map_err(|e| e.to_string())
+                })
+                .collect::<Result<Vec<Tx>, String>>()?;
+            st.process_package(txs, None)
+                .map(|ids| json!(ids.iter().map(|id| hex(id)).collect::<Vec<_>>()))
+                .map_err(|e| e.to_string())
+        }
         "utxos" => match owners_param(arg(0)?)? {
             Some(list) => Ok(json!(per_owner(&list, |o| utxos_of(&st, o)))),
             None => Ok(json!(utxos_of(&st, &hash_param(arg(0)?)?))),

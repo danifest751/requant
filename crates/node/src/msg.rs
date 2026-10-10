@@ -11,9 +11,11 @@ use tnet::sha256::sha256;
 /// are ignored); `GetAddr`/`Addr` exchange peer addresses.
 /// Protocol 3 adds headers-first sync (`GetHeaders`/`Headers`); peers below 3 are synced block by block.
 /// Protocol 4 adds `Release` (signed release announcements, see `release`); only sent to peers at 4 or above.
-pub const PROTOCOL: u32 = 4;
+/// Protocol 5 adds `Package` (a transaction with unconfirmed parents, see `Mempool::add_package`).
+pub const PROTOCOL: u32 = 5;
 pub const HEADERS_PROTOCOL: u32 = 3;
 pub const RELEASE_PROTOCOL: u32 = 4;
+pub const PACKAGE_PROTOCOL: u32 = 5;
 pub const MAX_HEADERS: usize = 2000;
 pub const MIN_PROTOCOL: u32 = 2;
 pub const MAX_ADDR: usize = 100;
@@ -46,6 +48,8 @@ pub enum Msg {
     Headers(Vec<u8>),
     /// A signed release manifest (`release::Release::encode`).
     Release(Vec<u8>),
+    /// Encoded transactions, parents first: `varint n || (varint len || tx)*`.
+    Package(Vec<Vec<u8>>),
 }
 
 impl Msg {
@@ -55,6 +59,7 @@ impl Msg {
             Msg::Block(b) | Msg::Tx(b) | Msg::Headers(b) | Msg::Release(b) => b.len(),
             Msg::GetBlocks(v) | Msg::Inv(v) | Msg::GetData(v) | Msg::GetHeaders(v) => 32 * v.len(),
             Msg::Addr(v) => 19 * v.len(),
+            Msg::Package(v) => v.iter().map(|t| 4 + t.len()).sum(),
             Msg::Hello { agent, .. } => 64 + agent.len(),
             Msg::Ping(_) | Msg::Pong(_) | Msg::GetAddr => 8,
         }
@@ -127,6 +132,13 @@ impl Msg {
                 w.raw(b);
                 12
             }
+            Msg::Package(v) => {
+                w.varint(v.len() as u64);
+                for t in v {
+                    w.bytes(t);
+                }
+                13
+            }
             Msg::Addr(v) => {
                 w.varint(v.len() as u64);
                 for a in v {
@@ -174,6 +186,14 @@ impl Msg {
             10 => Msg::GetHeaders(read_hashes(&mut r, MAX_LOCATOR)?),
             11 => return Ok(Msg::Headers(p.to_vec())),
             12 if p.len() <= 2 + crate::release::MAX_RELEASE_TEXT + 64 => return Ok(Msg::Release(p.to_vec())),
+            13 => {
+                let n = r.varint(crate::mempool::MAX_PACKAGE as u64)?;
+                let mut v = Vec::with_capacity(n as usize);
+                for _ in 0..n {
+                    v.push(r.bytes(crate::mempool::MAX_TX_BYTES)?.to_vec());
+                }
+                Msg::Package(v)
+            }
             9 => {
                 let n = r.varint(MAX_ADDR as u64)?;
                 let mut v = Vec::with_capacity(n as usize);
@@ -255,6 +275,7 @@ mod tests {
             Msg::Tx(vec![]),
             Msg::Ping(9),
             Msg::Pong(9),
+            Msg::Package(vec![vec![1, 2], vec![3]]),
         ];
         let mut buf = Vec::new();
         for m in &msgs {

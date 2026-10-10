@@ -8,7 +8,9 @@
 //! - `GET /api/address/<address|key hash>/balance`, `/utxos`, `/history?limit=N`;
 //! - `GET /api/utxos?owners=K1,K2,...`, `/api/history?owners=...&limit=N`: many key hashes at once (a
 //!   wallet's addresses), every entry marked with its `owner`;
-//! - `POST /api/tx` with the signed transaction in hex (the body, or `{"hex": ...}`): relays it; `{"txid"}`.
+//! - `POST /api/tx` with the signed transaction in hex (the body, or `{"hex": ...}`): relays it; `{"txid"}`;
+//! - `POST /api/package` with `{"hex": [parent, ..., child]}`: a transaction with unconfirmed parents that
+//!   may pay below the minimum fee on their own (package relay); `{"txids"}` admitted.
 //!
 //! Answers are what this node sees: a remote wallet trusts the node for balances and history (it cannot
 //! take coins: keys never leave the wallet), and the node learns which addresses it asks about.
@@ -28,8 +30,8 @@ use std::time::Instant;
 const BURST: f64 = 120.0;
 const PER_SECOND: f64 = 20.0;
 const SEND_COST: f64 = 10.0;
-/// Bytes accepted in a POST (a transaction is at most 100 kB, 200 kB in hex).
-pub const MAX_POST: usize = 256 << 10;
+/// Bytes accepted in a POST (a package is at most 200 kB, 400 kB in hex).
+pub const MAX_POST: usize = 512 << 10;
 
 static BUCKETS: Mutex<Option<HashMap<IpAddr, (f64, Instant)>>> = Mutex::new(None);
 
@@ -167,6 +169,28 @@ pub fn answer(shared: &Shared, method: &str, path: &str, body: &[u8], ip: IpAddr
             };
             match st.process_tx(tx, None) {
                 Ok(id) => ("200 OK", json!({"txid": hex(&id)})),
+                Err(e) => err("422 Unprocessable Entity", &e.to_string()),
+            }
+        }
+        (true, ["", "api", "package"]) => {
+            let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+            let Some(list) = v["hex"].as_array() else {
+                return err("400 Bad Request", "expected {\"hex\": [parent, ..., child]}");
+            };
+            let txs = match list
+                .iter()
+                .map(|h| {
+                    unhex(h.as_str().unwrap_or_default())
+                        .map_err(|e| e.to_string())
+                        .and_then(|b| Tx::decode_exact(&b).map_err(|e| e.to_string()))
+                })
+                .collect::<Result<Vec<Tx>, String>>()
+            {
+                Ok(t) => t,
+                Err(e) => return err("400 Bad Request", &format!("not a transaction: {e}")),
+            };
+            match st.process_package(txs, None) {
+                Ok(ids) => ("200 OK", json!({"txids": ids.iter().map(|id| hex(id)).collect::<Vec<_>>()})),
                 Err(e) => err("422 Unprocessable Entity", &e.to_string()),
             }
         }

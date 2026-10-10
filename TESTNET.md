@@ -35,7 +35,7 @@ given back when other programs need it). A block is verified in about 0.1 s. JSO
 standard error codes); requests without `"jsonrpc"` are answered in the older `{"result", "error"}` form,
 which miners and older tools use. Parameters are positional. Methods: `getinfo`, `getnetworkinfo`,
 `getpeerinfo`, `addpeer`, `getblock` and `getblockheader` (a height or an id), `getblockhash`,
-`getchaintips`, `gettx`, `decodetx`, `sendtx`, `getrawmempool [verbose]`, `getmempoolinfo`,
+`getchaintips`, `gettx`, `decodetx`, `sendtx`, `sendpackage`, `getrawmempool [verbose]`, `getmempoolinfo`,
 `estimatefee [blocks]` (atoms per byte to get in within that many blocks of the pool's queue),
 `utxos`, `getbalance`, `history` (by key hash), `validateaddress`, `getwork payee [longpollid]` (with the
 `longpollid` of the last work it waits up to 60 s for the next block), `submitwork`, `auditsupply`,
@@ -152,6 +152,7 @@ origin and rate-limited per client address (a burst of 120 requests, then 20 a s
 | `GET /api/address/<...>/utxos`, `/history?limit=N` | spendable coins; transactions, newest first |
 | `GET /api/utxos?owners=K1,K2,...`, `/api/history?owners=...&limit=N` | up to 200 owners at once, entries name their `owner` |
 | `POST /api/tx` (body: hex, or `{"hex": ...}`) | relays a signed transaction: `{"txid": ...}` |
+| `POST /api/package` (`{"hex": [parent, ..., child]}`) | relays a transaction with unconfirmed parents that may pay below the minimum fee on their own: `{"txids": [...]}` |
 
 ```sh
 curl -s http://193.187.93.29:19380/api/info

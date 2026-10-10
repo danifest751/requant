@@ -378,3 +378,74 @@ asset linux-x86_64 {} https://example.org/requantd
     let b2 = node_with(&db, vec![], None, pk);
     assert_eq!(request(b2.rpc.unwrap(), "getrelease", json!([])).unwrap()["version"], "99.0.0");
 }
+
+/// A parent paying nothing and a child paying for both: sent as a package to b, relayed to the miner a and
+/// mined; a second package survives a restart of b (its saved pool is admitted again as a package).
+#[test]
+fn packages_relay_and_survive_a_restart() {
+    let (alice, bob) = (SigningKey::from_bytes(&[5; 32]), SigningKey::from_bytes(&[6; 32]));
+    let (dir_a, dir_b) = (datadir("pkg-a"), datadir("pkg-b"));
+    let a = node(&dir_a, vec![], Some(addr(&alice)));
+    wait("a to mine", 60, || height(&a) >= 5);
+    let b = node(&dir_b, vec![a.p2p.to_string()], None);
+    wait("b to sync", 60, || height(&b) + 1 >= height(&a) && height(&b) >= 5);
+    let rpc_b = b.rpc.unwrap();
+    let chain_id = Network::regtest().chain_id;
+    let spendable = |rpc| {
+        let coins = request(rpc, "utxos", json!([hex(&addr(&alice))])).unwrap();
+        coins
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["spendable"].as_bool().unwrap() && c["confirmed"].as_bool().unwrap())
+            .map(|c| {
+                let op = OutPoint {
+                    txid: unhex(c["txid"].as_str().unwrap()).unwrap().try_into().unwrap(),
+                    vout: c["vout"].as_u64().unwrap() as u32,
+                };
+                (op, c["value"].as_u64().unwrap())
+            })
+            .collect::<Vec<_>>()
+    };
+    let package = |op: OutPoint, value: u64, pay: u64| {
+        let mut parent =
+            Tx::Transfer { inputs: vec![Input::new(op)], outputs: vec![Output { value, pkh: addr(&alice) }] };
+        parent.sign(&chain_id, &[&alice]);
+        let mut child = Tx::Transfer {
+            inputs: vec![Input::new(OutPoint { txid: parent.txid(), vout: 0 })],
+            outputs: vec![
+                Output { value: pay, pkh: addr(&bob) },
+                Output { value: value - pay - 2000, pkh: addr(&alice) },
+            ],
+        };
+        child.sign(&chain_id, &[&alice]);
+        (parent, child)
+    };
+    let coins = spendable(rpc_b);
+    let (parent, child) = package(coins[0].0, coins[0].1, 7_777);
+    assert!(request(rpc_b, "sendtx", json!([hex(&parent.encode())])).is_err(), "below the minimum alone");
+    let ids = request(rpc_b, "sendpackage", json!([[hex(&parent.encode()), hex(&child.encode())]])).unwrap();
+    assert_eq!(ids, json!([hex(&parent.txid()), hex(&child.txid())]));
+    let bob_hex = hex(&addr(&bob));
+    wait("the package to be relayed to a and mined", 60, || {
+        request(rpc_b, "utxos", json!([bob_hex]))
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["value"] == 7_777 && c["confirmed"] == true)
+    });
+
+    // the miner stops; b keeps a second package and restores it after a restart
+    a.stop.store(true, Ordering::Relaxed);
+    std::thread::sleep(Duration::from_millis(300));
+    let coins = spendable(rpc_b);
+    let (parent, child) = package(coins[0].0, coins[0].1, 8_888);
+    request(rpc_b, "sendpackage", json!([hex(&parent.encode()), hex(&child.encode())])).unwrap();
+    assert_eq!(b.shared.lock().unwrap().mempool.len(), 2);
+    b.shutdown();
+    drop(b);
+    let b2 = node(&dir_b, vec![], None);
+    let st = b2.shared.lock().unwrap();
+    assert!(st.mempool.contains(&parent.txid()) && st.mempool.contains(&child.txid()));
+}

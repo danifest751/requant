@@ -13,7 +13,8 @@
 //! Offline signing: prepare on an online machine (a watch-only copy is enough), sign on one without network:
 //! requant-wallet prepare     WALLET ADDRESS AMOUNT [ADDRESS AMOUNT]... [--out FILE]   (AMOUNT in RQT, or "all")
 //! requant-wallet sign        WALLET FILE [--out FILE]
-//! requant-wallet broadcast   FILE
+//! requant-wallet broadcast   FILE [FILE]...               (several: a package, parents first, so a child can
+//!                                                           pay for a parent below the minimum fee)
 //!
 //! A single key (the older format; still works everywhere a WALLET does, except the commands above):
 //! requant-wallet keygen      KEYFILE [--no-passphrase]
@@ -596,12 +597,28 @@ fn main() {
             tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&format!("signing failed: {e}")));
             write_out(&hex(&tx.encode()), "signed transaction");
         }
-        ["broadcast", file] => {
-            let text = read(file);
-            let bytes = unhex(text.trim()).unwrap_or_else(|_| die(&format!("{file}: not a signed transaction (hex)")));
-            let tx = Tx::decode_exact(&bytes).unwrap_or_else(|e| die(&format!("{file}: {e}")));
-            tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&format!("{file}: {e}")));
-            println!("sent, txid {}", send(&rpc(), &tx));
+        ["broadcast", files @ ..] if !files.is_empty() => {
+            let txs: Vec<Tx> = files
+                .iter()
+                .map(|file| {
+                    let text = read(file);
+                    let bytes =
+                        unhex(text.trim()).unwrap_or_else(|_| die(&format!("{file}: not a signed transaction (hex)")));
+                    let tx = Tx::decode_exact(&bytes).unwrap_or_else(|e| die(&format!("{file}: {e}")));
+                    tx.check_standalone(&net.chain_id).unwrap_or_else(|e| die(&format!("{file}: {e}")));
+                    tx
+                })
+                .collect();
+            if let [tx] = txs.as_slice() {
+                println!("sent, txid {}", send(&rpc(), tx));
+            } else {
+                let hexes: Vec<String> = txs.iter().map(|t| hex(&t.encode())).collect();
+                let ids =
+                    rpc().call("sendpackage", json!([hexes])).unwrap_or_else(|e| die(&format!("rpc: {e}")));
+                for id in ids.as_array().into_iter().flatten() {
+                    println!("sent, txid {}", id.as_str().unwrap_or(""));
+                }
+            }
         }
         // ---- spending conditions ----------------------------------------------------------------
         ["secret"] => {
@@ -937,7 +954,7 @@ fn main() {
             "usage: requant-wallet create WALLET [--no-passphrase] | restore WALLET [--no-scan] [--count N]\n",
             "       | phrase WALLET | newaddress WALLET [--count N] | addresses WALLET | watchonly WALLET OUT\n",
             "       | prepare WALLET ADDRESS AMOUNT|all [ADDRESS AMOUNT]... [--out FILE] | sign WALLET FILE [--out FILE]\n",
-            "       | broadcast FILE | keygen KEYFILE [--no-passphrase] | encrypt KEYFILE|WALLET | address KEYFILE|WALLET\n",
+            "       | broadcast FILE [FILE]... | keygen KEYFILE [--no-passphrase] | encrypt KEYFILE|WALLET | address KEYFILE|WALLET\n",
             "       | balance SRC | history SRC [N] | coins SRC | tx TXID   (SRC: an address, a key file or a wallet)\n",
             "       | send WALLET|KEYFILE ADDRESS AMOUNT|all [ADDRESS AMOUNT]... | consolidate WALLET|KEYFILE\n",
             "       | secret | pubkey SRC | condition KIND ARGS... [--out FILE]\n",

@@ -112,11 +112,11 @@ needs review.
   the amount and the network's hashrate, and say so to users. TNet hashrate cannot be rented on the
   usual GPU markets, which helps but does not remove this risk.
 - **Fees on pre-signed transfers.** Refunds and cancels are signed long before they are sent. If fees
-  rise in between, there are three ways to get them in (node 0.16.0): a child spending one of their
-  outputs pays for both (packages are ranked together); a signer who used anyone-can-pay lets anyone
-  add an input that raises the fee; and a single-signer transfer can be replaced by fee. Every
-  pre-signed transfer must still pay the minimum relay rate on its own, because nodes do not yet relay
-  packages with a parent below it.
+  rise in between, there are three ways to get them in: a child spending one of their outputs pays
+  for both (packages are ranked together, and since node 0.17.0 relayed together, so the pre-signed
+  parent may pay nothing); a signer who used anyone-can-pay lets anyone add an input that raises the
+  fee; and a single-signer transfer can be replaced by fee. A pre-signed transfer therefore only
+  needs an output its owner can spend with a child.
 - **Review.** The consensus rules are small, fixed templates with tests
   (`crates/consensus/tests/conditions.rs`). The protocols need their own review, the Monero one most
   of all.

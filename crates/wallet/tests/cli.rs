@@ -10,8 +10,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-fn dir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("requant-wallet-cli-{}", std::process::id()));
+/// One test at a time: on Windows a wallet process started by one test can inherit a connection the other
+/// test's node has just accepted (before the node marks it not inheritable), and that connection is reset
+/// when the process exits.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A fresh directory per test.
+fn dir(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("requant-wallet-cli-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -99,7 +109,8 @@ fn txid_of(out: &str) -> String {
 #[test]
 fn wallet_end_to_end() {
     let net = Network::regtest();
-    let d = dir();
+    let _one = serial();
+    let d = dir("e2e");
     let mut cli = Cli { dir: d.clone(), rpc: "127.0.0.1:1".into(), api: None };
 
     // a new wallet shows 24 words and its first address
@@ -225,7 +236,8 @@ fn wallet_end_to_end() {
 #[test]
 fn conditions_from_the_wallet_htlc_and_two_of_two() {
     let net = Network::regtest();
-    let d = dir();
+    let _one = serial();
+    let d = dir("conditions");
     let mut cli = Cli { dir: d.clone(), rpc: "127.0.0.1:1".into(), api: None };
     let field = |out: &str, name: &str| -> String {
         out.lines().find(|l| l.starts_with(name)).unwrap().split_whitespace().nth(1).unwrap().to_string()

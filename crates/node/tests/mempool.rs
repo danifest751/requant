@@ -198,3 +198,73 @@ fn a_well_paying_child_protects_its_parent_from_eviction() {
     assert!(pool.contains(&parent_id) && pool.contains(&child_id) && pool.contains(&newcomer_id));
     assert!(!pool.contains(&other_id));
 }
+
+/// A parent paying nothing, spending `op` (worth `value`).
+fn free_parent(chain: &Chain, op: OutPoint, value: u64) -> Tx {
+    spend(chain, op, value, 0)
+}
+
+#[test]
+fn package_relay_a_child_pays_for_a_parent_below_the_minimum() {
+    let (chain, coins) = funded(3);
+    let value = |op: &OutPoint| chain.coin(op).unwrap().output.value;
+    let size = spend(&chain, coins[0], value(&coins[0]), 1000).encode().len() as u64;
+    let mut pool = Mempool::default();
+    // a pre-signed parent paying nothing is refused on its own, and its child alone has no parent
+    let parent = free_parent(&chain, coins[0], value(&coins[0]));
+    let parent_id = parent.txid();
+    let child = spend(&chain, OutPoint { txid: parent_id, vout: 0 }, parent.outputs()[0].value, 3 * size);
+    assert_eq!(pool.add(parent.clone(), &chain), Err(Error::Invalid("fee below the minimum (1 atom per byte)")));
+    assert_eq!(pool.add(child.clone(), &chain), Err(Error::Invalid("missing or spent input")));
+    // child first, a lone transaction, an unrelated member: refused
+    assert!(pool.add_package(vec![child.clone(), parent.clone()], &chain).is_err());
+    assert!(pool.add_package(vec![parent.clone()], &chain).is_err());
+    let other = spend(&chain, coins[1], value(&coins[1]), 5 * size);
+    assert_eq!(
+        pool.add_package(vec![parent.clone(), other], &chain),
+        Err(Error::Invalid("not a transaction with its parents"))
+    );
+    // a child paying for itself and half of the parent: the pair is below the minimum
+    let stingy = spend(&chain, OutPoint { txid: parent_id, vout: 0 }, parent.outputs()[0].value, size + size / 2);
+    assert_eq!(
+        pool.add_package(vec![parent.clone(), stingy], &chain),
+        Err(Error::Invalid("package fee below the minimum (1 atom per byte)"))
+    );
+    assert!(pool.is_empty(), "nothing of a refused package stays");
+    // together they pay 1.5 atoms per byte: admitted, and blocks take both, parent first
+    let ids = pool.add_package(vec![parent.clone(), child.clone()], &chain).unwrap();
+    let child_id = child.txid();
+    assert_eq!(ids, vec![parent_id, child_id]);
+    assert_eq!(pool.add_package(vec![parent, child], &chain), Err(Error::Duplicate));
+    let (txs, fees) = pool.select(10 * size as usize);
+    assert_eq!(txs.iter().map(|t| t.txid()).collect::<Vec<_>>(), vec![parent_id, child_id]);
+    assert_eq!(fees, 3 * size);
+}
+
+#[test]
+fn a_parent_nothing_pays_for_leaves_the_pool() {
+    let (mut chain, coins) = funded(2);
+    let (v0, v1) = (chain.coin(&coins[0]).unwrap().output.value, chain.coin(&coins[1]).unwrap().output.value);
+    let size = spend(&chain, coins[0], v0, 1000).encode().len() as u64;
+    let me = pkh(&key().verifying_key().to_bytes());
+    let mut pool = Mempool::default();
+    let parent = free_parent(&chain, coins[0], v0);
+    let parent_id = parent.txid();
+    // the child spends the parent's coin and another one
+    let mut child = Tx::Transfer {
+        inputs: vec![Input::new(OutPoint { txid: parent_id, vout: 0 }), Input::new(coins[1])],
+        outputs: vec![Output { value: parent.outputs()[0].value + v1 - 6 * size, pkh: me }],
+    };
+    child.sign(&chain.net.chain_id, &[&key(), &key()]);
+    pool.add_package(vec![parent, child.clone()], &chain).unwrap();
+    // a new block changes nothing: the child still pays for both
+    grow(&mut chain);
+    pool.revalidate(&chain);
+    assert_eq!(pool.len(), 2);
+    // the child is replaced through its other coin: nothing pays for the parent any more
+    let replacement = spend(&chain, coins[1], v1, 20 * size);
+    let replacement_id = pool.add(replacement, &chain).unwrap();
+    assert!(pool.contains(&replacement_id));
+    assert!(!pool.contains(&child.txid()) && !pool.contains(&parent_id), "the parent left with its payer");
+    assert_eq!(pool.len(), 1);
+}
