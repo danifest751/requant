@@ -166,6 +166,17 @@ fn call(shared: &Shared, method: &str, p: &[Value]) -> Result<Value, String> {
                 "uptime_s": now().saturating_sub(st.started),
             }))
         }
+        // the supply audit: what the UTXO set holds against what the emission allows, and the set's hash
+        "auditsupply" => Ok(crate::node::supply_audit(&st)),
+        // what the watchman found, newest first
+        "getevents" => Ok(json!(st
+            .events
+            .list
+            .iter()
+            .rev()
+            .map(|e| json!({"time": e.time, "level": e.level.name(),
+            "text": e.text}))
+            .collect::<Vec<_>>())),
         // the newest signed release this node knows, and whether it is newer than this node
         "getrelease" => Ok(match &st.release {
             Some(r) => json!({"version": r.version_string(), "newer": r.version > crate::release::own_version(),

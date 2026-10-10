@@ -29,6 +29,7 @@ fn node(dir: &Path, connect: Vec<String>, mine: bool) -> Handle {
         pool: None,
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
+        notify: Default::default(),
         faucet: None,
     })
     .unwrap()

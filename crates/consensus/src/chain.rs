@@ -136,6 +136,29 @@ impl Chain {
         self.utxo.len()
     }
 
+    /// The supply audit (linear scan): the UTXO set's total value and count, and a hash of the whole set in
+    /// outpoint order (`H("requant/utxoset", ...)` chained over chunks of 1024 entries of `txid || LE32 vout ||
+    /// LE64 value || pkh || LE64 height || coinbase`), so two nodes compare their state with one string.
+    pub fn utxo_audit(&self) -> (u64, usize, Hash) {
+        let mut set: Vec<(&OutPoint, &Coin)> = self.utxo.iter().collect();
+        set.sort_unstable_by_key(|(op, _)| **op);
+        let total = set.iter().map(|(_, c)| c.output.value).sum();
+        let mut h = tagged("requant/utxoset", &[&(set.len() as u64).to_le_bytes()]);
+        for chunk in set.chunks(1024) {
+            let mut buf = Vec::with_capacity(chunk.len() * 89);
+            for (op, c) in chunk {
+                buf.extend_from_slice(&op.txid);
+                buf.extend_from_slice(&op.vout.to_le_bytes());
+                buf.extend_from_slice(&c.output.value.to_le_bytes());
+                buf.extend_from_slice(&c.output.pkh);
+                buf.extend_from_slice(&c.height.to_le_bytes());
+                buf.push(c.coinbase as u8);
+            }
+            h = tagged("requant/utxoset", &[&h, &buf]);
+        }
+        (total, set.len(), h)
+    }
+
     /// Addresses (key hashes) holding at least one unspent output (linear scan).
     pub fn holder_count(&self) -> usize {
         self.utxo.values().map(|c| c.output.pkh).collect::<std::collections::HashSet<_>>().len()

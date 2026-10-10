@@ -344,9 +344,54 @@ impl Epoch {
     }
 }
 
+/// Transposed layers held apart and read through [`LayerSource`] (the path file-backed weights take).
+struct HeldLayers(Vec<Vec<i8>>, usize);
+
+impl LayerSource for HeldLayers {
+    fn read(&self, l: usize, j0: usize, out: &mut [i8]) -> std::io::Result<()> {
+        out.copy_from_slice(&self.0[l][j0 * self.1..j0 * self.1 + out.len()]);
+        Ok(())
+    }
+}
+
+/// Start-up self-test: SHA-256 on a published vector, then the verifier as it runs (vectorised dot product,
+/// several threads, weights in memory and read through a [`LayerSource`]) against the plain row-major
+/// reference on small parameters. A miscompiled build or a faulty CPU fails here instead of disagreeing
+/// with the network on a real block. Takes a few milliseconds.
+pub fn self_test() -> Result<(), &'static str> {
+    let abc = sha256(b"abc");
+    if abc[..4] != [0xba, 0x78, 0x16, 0xbf] || abc[28..] != [0xf2, 0x00, 0x15, 0xad] {
+        return Err("SHA-256 does not match its test vector");
+    }
+    // n above ROWS_PER_READ so the block-wise reads are exercised too
+    let p = Params { n: 320, b: 8, layers: 3, w: 64, mult: default_mult(320) };
+    let seed = [0x5a; 32];
+    let weights: Vec<Vec<i8>> = (0..p.layers as u32).map(|l| layer_weights(&seed, p.n, l)).collect();
+    let mem = Epoch::from_weights(&weights, p);
+    let held = Epoch::from_source(
+        p,
+        Box::new(HeldLayers((0..p.layers as u32).map(|l| transposed_layer(&seed, p, l)).collect(), p.n)),
+    );
+    let x = x0_seed(&[0x3c; 32], 7);
+    for i in [0, 3, 7] {
+        let want = reference_row(&weights, &p, &x, i);
+        for threads in [1, 3] {
+            if mem.forward_row(&x, i, threads) != want || held.forward_row(&x, i, threads) != want {
+                return Err("the verifier disagrees with the reference computation");
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn self_test_passes() {
+        self_test().unwrap();
+    }
 
     fn small() -> Params {
         Params { n: 64, b: 16, layers: 4, w: 16, mult: default_mult(64) }

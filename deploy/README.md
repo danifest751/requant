@@ -28,6 +28,14 @@ Check a node: `journalctl -u requantd -f`, `curl -s -X POST 127.0.0.1:19334 -d '
 A node with the explorer also answers `GET /health` (JSON; HTTP 503 when it has no peers, no block for
 20 minutes, or is still syncing), for an uptime monitor.
 
+The node watches itself and reports events (no block for 20 minutes, no peers, a reorganisation of two or
+more blocks, the network rate tripling or falling to a third within an hour, a block of the current epoch
+that no longer verifies when checked again, a failed supply audit) in the log, in `getevents`, on the
+explorer's network page and, with `--notify-url URL` (JSON POST) or `--notify-telegram TOKEN:CHAT_ID`, to a
+webhook or a Telegram chat. `auditsupply` checks that the UTXO set holds no more than the emission schedule
+allows and returns the set's hash, to compare between nodes. At start the node runs a TNet self-test and
+refuses to verify blocks if this build or machine disagrees with the reference.
+
 With `AUTO_UPDATE=1` the node runs with `--auto-update` and owns `/opt/requant`, so it can replace its
 binary with a newer signed release (see `TESTNET.md`, Updates).
 

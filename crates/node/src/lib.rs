@@ -13,3 +13,4 @@ pub mod pool;
 pub mod release;
 pub mod rpc;
 pub mod store;
+pub mod watch;

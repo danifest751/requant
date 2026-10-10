@@ -51,6 +51,7 @@ fn faucet_sends_once_a_day() {
         pool: None,
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
+        notify: Default::default(),
         faucet: Some(FaucetConfig { key: fkey, amount: 100_000_000, daily: 1_000_000_000 }),
     })
     .unwrap();
@@ -91,6 +92,7 @@ fn faucet_sends_once_a_day() {
         pool: None,
         auto_update: false,
         release_key: requant_node::release::RELEASE_KEY,
+        notify: Default::default(),
         faucet: Some(FaucetConfig { key: fkey, amount: 100_000_000, daily: 1_000_000_000 }),
     })
     .unwrap();

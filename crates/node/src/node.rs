@@ -118,6 +118,8 @@ pub struct Config {
     pub release_key: [u8; 32],
     /// Run the test-network faucet from this key (see `faucet`).
     pub faucet: Option<crate::faucet::FaucetConfig>,
+    /// Where the watchman's events are sent (see `watch`).
+    pub notify: crate::watch::NotifyConfig,
 }
 
 /// Default reorg limit: one epoch (a day on the test network).
@@ -197,6 +199,8 @@ pub struct State {
     pub auto_update: bool,
     pub release_key: [u8; 32],
     pub faucet: Option<crate::faucet::Faucet>,
+    /// What the watchman found (see `watch`).
+    pub events: crate::watch::Events,
     allow_local: bool,
     pub started: u64,
     pub pool: Option<crate::pool::Pool>,
@@ -339,6 +343,17 @@ impl State {
                     self.headers.add_valid(&b.header, &b.claim);
                     if let Err(e) = self.store.append(&bytes) {
                         eprintln!("store: {e}");
+                    }
+                    if let Accepted::Reorg { disconnected } = acc {
+                        if disconnected >= 2 {
+                            self.events.push(
+                                crate::watch::Level::Warning,
+                                format!(
+                                    "reorganisation: {disconnected} blocks replaced, new tip at {}",
+                                    self.chain.height()
+                                ),
+                            );
+                        }
                     }
                     if acc != Accepted::SideChain {
                         self.mempool.revalidate(&self.chain);
@@ -884,6 +899,23 @@ pub fn connect(shared: &Shared, addr: &str) -> io::Result<()> {
     spawn_peer(shared.clone(), stream, true)
 }
 
+/// The supply audit as JSON: the UTXO set's total and count, the most the emission schedule allows by the tip
+/// (`issued`), what miners left unclaimed, whether the set stays within the schedule, and the set's hash.
+pub fn supply_audit(st: &State) -> serde_json::Value {
+    let (total, count, hash) = st.chain.utxo_audit();
+    let issued = st.chain.issued();
+    serde_json::json!({
+        "height": st.chain.height(),
+        "tip": crate::rpc::hex(&st.chain.tip()),
+        "utxos": count,
+        "total_atoms": total,
+        "issued_atoms": issued,
+        "unclaimed_atoms": issued.saturating_sub(total),
+        "ok": total <= issued,
+        "utxo_hash": crate::rpc::hex(&hash),
+    })
+}
+
 /// Bans still in force from `bans.txt` ("ip until" per line; a missing or bad file means none).
 fn load_bans(path: &std::path::Path) -> HashMap<IpAddr, u64> {
     let t = now();
@@ -903,6 +935,12 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     let dir = cfg.datadir.join(cfg.net.name);
     // a just-installed update that keeps failing is rolled back before anything else (see `release`)
     crate::release::startup_check(&dir.join("update"));
+    // the work-function code as built here must agree with the reference before it judges any block
+    if let Err(e) = tnet::self_test() {
+        return Err(io::Error::other(format!(
+            "TNet self-test failed: {e}; this build or this machine cannot verify blocks"
+        )));
+    }
     let (store, records) = Store::open(&dir)?;
     let mut chain = Chain::new(cfg.net.clone(), cfg.threads);
     chain.set_max_reorg(cfg.max_reorg);
@@ -958,6 +996,7 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
         auto_update: cfg.auto_update,
         release_key: cfg.release_key,
         faucet: cfg.faucet.clone().map(|f| crate::faucet::Faucet::new(f, dir.join("faucet.json"))),
+        events: crate::watch::Events::default(),
     };
     let restored = state.load_mempool();
     if restored > 0 {
@@ -1002,6 +1041,10 @@ pub fn start(cfg: Config) -> io::Result<Handle> {
     {
         let (shared, stop) = (shared.clone(), stop.clone());
         std::thread::spawn(move || epoch_preparer(shared, stop));
+    }
+    {
+        let (shared, stop, notify) = (shared.clone(), stop.clone(), cfg.notify.clone());
+        std::thread::spawn(move || crate::watch::watch(shared, notify, stop));
     }
     if cfg.auto_update {
         let (shared, dir) = (shared.clone(), dir.join("update"));

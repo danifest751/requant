@@ -407,7 +407,19 @@ fn home(st: &crate::node::State) -> String {
         (format!("{}tickets/s", si(rate)), format!("network rate (last {} blocks)", tip_h - from)),
         (format!("{avg:.0} s"), "average block time (target 60 s)".into()),
         (si(work), "tickets per block (difficulty)".into()),
-        (format!("{} RQT", format_amount(chain.issued()).split('.').next().unwrap_or("0")), "issued".into()),
+        {
+            // the supply audit: the UTXO set against the emission schedule
+            let a = crate::node::supply_audit(st);
+            let total = a["total_atoms"].as_u64().unwrap_or(0);
+            (
+                format!("{} RQT", format_amount(total).split('.').next().unwrap_or("0")),
+                if a["ok"] == true {
+                    "in circulation · audited within the emission schedule".to_string()
+                } else {
+                    "in circulation · AUDIT FAILED: more than the schedule allows".to_string()
+                },
+            )
+        },
         (
             format!("{}", st.chain.holder_count()),
             format!("addresses holding coins ({} ever used)", st.index.address_count()),
@@ -533,6 +545,16 @@ fn network_page(st: &crate::node::State) -> String {
         (format!("{}", peers.len()), format!("peers ({outbound} outbound, {} inbound)", peers.len() - outbound)),
         (format!("{}", st.chain.height()), "block height".to_string()),
         (format!("{}", st.headers.height()), "verified headers".to_string()),
+        {
+            let a = crate::node::supply_audit(st);
+            (
+                short(a["utxo_hash"].as_str().unwrap_or("")),
+                format!(
+                    "hash of the UTXO set at height {} ({} outputs); compare it between nodes",
+                    a["height"], a["utxos"]
+                ),
+            )
+        },
         (format!("{}", st.mempool.len()), format!("unconfirmed transactions ({} bytes)", st.mempool.bytes())),
         (crate::node::agent(), format!("this node, up {}", ago(st.started))),
     ];
@@ -563,6 +585,25 @@ fn network_page(st: &crate::node::State) -> String {
             name(&p.agent),
             p.height,
             ago(p.since)
+        );
+    }
+    // what the watchman found
+    body += "</tbody></table></div><h2>Events</h2><div class=\"tbl\"><table><thead><tr><th>Time (UTC)</th><th>Level</th><th>What happened</th></tr></thead><tbody>";
+    if st.events.list.is_empty() {
+        body += "<tr><td colspan=\"3\" class=\"empty\">Nothing to report: blocks arrive, peers are connected, old blocks still verify and the supply audit passes.</td></tr>";
+    }
+    for e in st.events.list.iter().rev().take(20) {
+        let cls = match e.level {
+            crate::watch::Level::Info => "b-ok",
+            crate::watch::Level::Warning => "b-warn",
+            crate::watch::Level::Critical => "b-bad",
+        };
+        body += &format!(
+            "<tr><td>{} <span class=\"mut\">· {} ago</span></td><td><span class=\"badge {cls}\">{}</span></td><td>{}</td></tr>",
+            utc(e.time),
+            ago(e.time),
+            e.level.name(),
+            esc(&e.text)
         );
     }
     body += "</tbody></table></div><h2>Unconfirmed transactions</h2><div class=\"tbl\"><table><thead><tr><th>Transaction</th><th class=\"r\">Size (bytes)</th><th class=\"r\">Fee (RQT)</th><th class=\"r\">Fee per byte (atoms)</th></tr></thead><tbody>";

@@ -18,6 +18,7 @@ fn main() {
     let (mut connect, mut mine_to, mut interval, mut threads) = (Vec::new(), None, 1000u64, 4usize);
     let mut max_reorg = None::<u64>;
     let (mut rpc_token, mut discover, mut auto_update) = (None::<String>, true, false);
+    let mut notify = requant_node::watch::NotifyConfig::default();
     let mut explorer = None;
     let (mut pool_addr, mut pool_key, mut pool_fee, mut share_bits) = (None, None::<[u8; 32]>, 1.0f64, 24u32);
     let (mut min_payout, mut payout_every) = (100_000_000u64, 600u64);
@@ -63,6 +64,12 @@ fn main() {
             }
             "--pool-payout-every" => {
                 payout_every = value(k).parse().unwrap_or_else(|_| usage("bad --pool-payout-every"))
+            }
+            "--notify-url" => notify.url = Some(value(k)),
+            "--notify-telegram" => {
+                let v = value(k);
+                let (token, chat) = v.rsplit_once(':').unwrap_or_else(|| usage("--notify-telegram TOKEN:CHAT_ID"));
+                notify.telegram = Some((token.to_string(), chat.to_string()));
             }
             "--faucet-key" => {
                 let f = value(k);
@@ -145,6 +152,7 @@ fn main() {
         }),
         auto_update,
         release_key: requant_node::release::RELEASE_KEY,
+        notify,
         faucet: faucet_key.map(|key| requant_node::faucet::FaucetConfig {
             key,
             amount: faucet_amount,
@@ -181,7 +189,7 @@ fn usage(msg: &str) -> ! {
         "usage: requantd [--network test|regtest] [--datadir DIR] [--listen ADDR] [--rpc ADDR] [--connect HOST:PORT]...\n\
          \x20               [--mine PKH_HEX] [--mine-interval-ms N] [--threads N] [--max-reorg BLOCKS]
 \n                         [--rpc-token-file FILE] [--no-discover] [--explorer ADDR] [--auto-update] [--version]
-                         [--faucet-key FILE [--faucet-amount RQT] [--faucet-daily RQT]]"
+                         [--faucet-key FILE [--faucet-amount RQT] [--faucet-daily RQT]] [--notify-url URL] [--notify-telegram TOKEN:CHAT]"
     );
     std::process::exit(2)
 }

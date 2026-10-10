@@ -501,3 +501,19 @@ fn undo_restores_exactly_after_reorg_and_failed_connect() {
     assert!(chain.coin(&op).is_some(), "the spent coin is back");
     assert!(chain.coins_of(&addr(&key(3))).is_empty());
 }
+
+#[test]
+fn supply_audit_and_utxo_hash() {
+    let (mut a, mut b) = (Chain::new(Network::regtest(), 1), Chain::new(Network::regtest(), 1));
+    let alice = addr(&key(1));
+    for _ in 0..5 {
+        let blk = extend(&mut a, &alice, vec![]);
+        assert!(b.accept(blk, NOW).is_ok());
+    }
+    // the same blocks give the same set, hash and total, within what the schedule issued
+    let (total, count, hash) = a.utxo_audit();
+    assert_eq!(b.utxo_audit(), (total, count, hash));
+    assert!(total > 0 && total <= a.issued());
+    extend(&mut a, &alice, vec![]);
+    assert_ne!(a.utxo_audit().2, hash);
+}
