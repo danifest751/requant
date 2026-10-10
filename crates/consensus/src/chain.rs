@@ -136,6 +136,11 @@ impl Chain {
         self.utxo.len()
     }
 
+    /// Addresses (key hashes) holding at least one unspent output (linear scan).
+    pub fn holder_count(&self) -> usize {
+        self.utxo.values().map(|c| c.output.pkh).collect::<std::collections::HashSet<_>>().len()
+    }
+
     /// Unspent outputs paying to `pkh` (linear scan; for wallets and tests).
     pub fn coins_of(&self, owner: &Hash) -> Vec<(OutPoint, Coin)> {
         let mut v: Vec<_> = self.utxo.iter().filter(|(_, c)| c.output.pkh == *owner).map(|(o, c)| (*o, *c)).collect();

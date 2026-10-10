@@ -159,6 +159,13 @@ fn pool_shares_blocks_and_payouts() {
     let stats = request(pool_addr, "poolstats", json!([])).unwrap();
     assert!(stats["blocks"].as_array().unwrap().len() >= blocks);
     assert!(!stats["payouts"].as_array().unwrap().is_empty());
+    // the network figures: alice, bob and the pool hold coins; payouts are transfers
+    let nw = &stats["network"];
+    assert!(nw["addresses_holding"].as_u64().unwrap() >= 3, "{nw}");
+    assert!(nw["addresses_used"].as_u64().unwrap() >= nw["addresses_holding"].as_u64().unwrap());
+    assert!(
+        nw["transfers"].as_u64().unwrap() >= 1 && nw["transactions"].as_u64().unwrap() > nw["height"].as_u64().unwrap()
+    );
     let (a, b) = (paid(&alice), paid(&bob));
     assert!(a > b, "alice {a} bob {b}");
     // per-device statistics under alice's one address (payouts go to the address)

@@ -713,6 +713,14 @@ pub fn stats(st: &State) -> Option<Value> {
         "port": pool.cfg.listen.port(),
         "maturity": net.maturity,
         "tickets_per_s": total_rate,
+        // the network around the pool: addresses and transactions on the best chain
+        "network": {
+            "addresses_holding": st.chain.holder_count(),
+            "addresses_used": st.index.address_count(),
+            "transactions": st.index.tx_count(),
+            "transfers": st.index.tx_count().saturating_sub(st.chain.height() as usize + 1),
+            "height": st.chain.height(),
+        },
         "miners": miners,
         "blocks": pool.found.iter().rev().take(50).map(|f| json!({"height": f.height, "id": hex(&f.id), "time": f.time,
             "finder": address(net, &f.finder), "reward": f.reward, "status": f.status})).collect::<Vec<_>>(),

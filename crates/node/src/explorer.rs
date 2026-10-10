@@ -363,6 +363,14 @@ fn home(st: &crate::node::State) -> String {
         (format!("{avg:.0} s"), "average block time (target 60 s)".into()),
         (si(work), "tickets per block (difficulty)".into()),
         (format!("{} RQT", format_amount(chain.issued()).split('.').next().unwrap_or("0")), "issued".into()),
+        (
+            format!("{}", st.chain.holder_count()),
+            format!("addresses holding coins ({} ever used)", st.index.address_count()),
+        ),
+        (
+            format!("{}", st.index.tx_count()),
+            format!("transactions ({} transfers)", st.index.tx_count().saturating_sub(tip_h as usize + 1)),
+        ),
         (format!("{}", st.mempool.len()), "unconfirmed transactions".into()),
         (format!("{}", st.peer_count()), "peers of this node".into()),
         (
@@ -702,6 +710,23 @@ fn pool_page(s: &serde_json::Value, host: &str) -> String {
         s["share_bits"],
         n(&s["maturity"]),
     );
+    let nw = &s["network"];
+    let cards = [
+        (
+            format!("{}", n(&nw["addresses_holding"])),
+            format!("addresses holding coins ({} ever used)", n(&nw["addresses_used"])),
+        ),
+        (
+            format!("{}", n(&nw["transactions"])),
+            format!("transactions on the chain ({} transfers)", n(&nw["transfers"])),
+        ),
+        (format!("{}", n(&nw["height"])), "block height".to_string()),
+    ];
+    body += "<h2>Network</h2><div class=\"cards\">";
+    for (v, l) in cards {
+        body += &format!("<div class=\"card\"><div class=\"k\">{l}</div><div class=\"v\">{v}</div></div>");
+    }
+    body += "</div>";
     body += "<h2>Miners</h2><div class=\"tbl\"><table><thead><tr><th>Address · devices</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th>\
 <th class=\"r\">Maturing</th><th class=\"r\">Balance</th><th>To payout</th><th class=\"r\">Paid</th></tr></thead><tbody>";
     if miners.is_empty() {

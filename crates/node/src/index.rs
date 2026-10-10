@@ -109,4 +109,9 @@ impl TxIndex {
     pub fn tx_count(&self) -> usize {
         self.txs.len()
     }
+
+    /// Addresses that ever received or sent on the best chain.
+    pub fn address_count(&self) -> usize {
+        self.addr.len()
+    }
 }
