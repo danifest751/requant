@@ -740,7 +740,7 @@ fn chart(series: &[Series], unit: &str) -> String {
         return "<div class=\"empty\">Collecting data: the chart fills in over the next hours (one point every 5 minutes).</div>"
             .into();
     }
-    let (w, h, l, r, t, b) = (720.0, 210.0, 58.0, 10.0, 10.0, 24.0);
+    let (w, h, l, r, t, b) = (720.0, 250.0, 58.0, 24.0, 10.0, 24.0);
     let t0 = pts.iter().map(|p| p.0).min().unwrap() as f64;
     let t1 = (pts.iter().map(|p| p.0).max().unwrap() as f64).max(t0 + 1.0);
     let top = pts.iter().map(|p| p.1).fold(0.0, f64::max).max(1.0) * 1.12;
@@ -1094,11 +1094,23 @@ fn miner_page(m: &serde_json::Value, host: &str, port: u64) -> String {
         false,
     );
     body += "</div>";
-    let hist: Vec<(u64, f64)> =
-        m["history"].as_array().into_iter().flatten().filter_map(|h| Some((h[0].as_u64()?, h[1].as_f64()?))).collect();
+    let points = |k: &str, i: usize| -> Vec<(u64, f64)> {
+        m[k].as_array().into_iter().flatten().filter_map(|h| Some((h[0].as_u64()?, h[i].as_f64()?))).collect()
+    };
+    // five-minute samples once there are some; until then the blocks this address found, by the hour
+    let hist = points("history", 1);
+    let (title, series, note) = if hist.len() >= 3 {
+        ("Rate, last 24 hours", hist, "From its shares, sampled every 5 minutes.")
+    } else {
+        (
+            "Rate by the hour, last 24 hours",
+            points("hourly", 1),
+            "From the blocks it found each hour; share-based samples follow.",
+        )
+    };
     body += &format!(
-        "<div class=\"panel\" style=\"margin-top:14px\"><h3>Rate, last 24 hours</h3>{}</div>",
-        chart(&[("this address", "var(--acc)", hist)], "")
+        "<div class=\"panel\" style=\"margin-top:14px\"><h3>{title}</h3>{}<p style=\"margin-top:8px\">{note}</p></div>",
+        chart(&[("this address", "var(--acc)", series)], "")
     );
     body += "<h2>Devices</h2><div class=\"tbl\"><table><thead><tr><th>Device</th><th class=\"r\">Rate</th><th class=\"r\">Shares</th>\
 <th class=\"r\">Rejected</th><th>Last share</th></tr></thead><tbody>";

@@ -759,7 +759,7 @@ fn sample(st: &State, pool: &mut Pool, t: u64) -> bool {
 
 /// The last day by the hour, from the chain itself (available at once, no sampling needed): the network's
 /// rate (expected tickets of its blocks per second) and the pool's (of the blocks it found).
-fn hourly(st: &State, pool: &Pool, t: u64) -> Vec<Value> {
+fn hourly(st: &State, pool: &Pool, t: u64, finder: Option<&Hash>) -> Vec<Value> {
     let start = t.saturating_sub(24 * 3600);
     let mut net = [0f64; 24];
     let mut mine = [0f64; 24];
@@ -776,7 +776,7 @@ fn hourly(st: &State, pool: &Pool, t: u64) -> Vec<Value> {
         if f.time < start {
             break;
         }
-        if f.status == "orphaned" {
+        if f.status == "orphaned" || finder.is_some_and(|m| *m != f.finder) {
             continue;
         }
         if let Some(b) = st.chain.block(&f.id) {
@@ -862,7 +862,7 @@ pub fn stats(st: &State) -> Option<Value> {
         "difficulty": difficulty,
         "devices": per_dev.values().filter(|r| **r > 0.0).count(),
         "history": pool.history.iter().map(|h| json!([h.0, h.1, h.2, h.3])).collect::<Vec<_>>(),
-        "hourly": hourly(st, pool, t),
+        "hourly": hourly(st, pool, t, None),
         // the network around the pool: addresses and transactions on the best chain
         "network": {
             "addresses_holding": st.chain.holder_count(),
@@ -923,6 +923,7 @@ pub fn miner_stats(st: &State, owner: &Hash) -> Option<Value> {
         "workers": workers,
         "history": pool.miner_history.get(owner).map(|h| h.iter().map(|(t, r)| json!([t, r])).collect::<Vec<_>>()).unwrap_or_default(),
         "payouts": payouts,
+        "hourly": hourly(st, pool, t, Some(owner)),
     }))
 }
 
